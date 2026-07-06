@@ -27,6 +27,10 @@ var allowedStrings = map[string]bool{
 	"Mode": true, "CWD": true, "Name": true,
 }
 
+// Scope: this walks flat string fields only. A future payload carrying
+// content in a non-string field ([]byte, nested struct, []string) needs
+// an explicit Apply case and its own test — this net will not catch it.
+//
 // TestMetadataClearsAllContentFields walks every payload type registered in
 // transcript.AllPayloads, fills every string field, applies Metadata, and
 // asserts no non-allowlisted string survives. Adding a payload type without

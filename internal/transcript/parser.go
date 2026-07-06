@@ -13,6 +13,13 @@ const MaxContentBytes = 2048
 
 // Parser derives events from one session's transcript lines, fed in file
 // order. It is not safe for concurrent use.
+//
+// A Parser must observe its file from offset 0: it emits session_started
+// for the first line it sees and carries timestamp/project state across
+// lines. Resuming mid-file with a fresh Parser changes event identity
+// (a spurious session_started shifts that line's seq numbers) and loses
+// carried state — a resuming consumer must replay from offset 0 or add a
+// state snapshot API first.
 type Parser struct {
 	sessionID string
 	project   string // first-seen cwd
@@ -106,14 +113,19 @@ func (p *Parser) Line(offset int64, data []byte) []Event {
 	return events
 }
 
-// truncate caps s at MaxContentBytes, trimming back to a UTF-8 boundary
+// truncate caps s at MaxContentBytes, trimming at most a split trailing
+// rune (an invalid byte elsewhere in s must not shrink the whole prefix),
 // and appending an ellipsis when cut.
 func truncate(s string) string {
 	if len(s) <= MaxContentBytes {
 		return s
 	}
 	cut := s[:MaxContentBytes]
-	for len(cut) > 0 && !utf8.ValidString(cut) {
+	for i := 0; i < utf8.UTFMax-1 && len(cut) > 0; i++ {
+		r, size := utf8.DecodeLastRuneInString(cut)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
 		cut = cut[:len(cut)-1]
 	}
 	return cut + "…"

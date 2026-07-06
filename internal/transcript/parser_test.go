@@ -2,8 +2,10 @@ package transcript
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // collect feeds lines to a parser sequentially, advancing offsets the way
@@ -244,5 +246,16 @@ func TestSystemTurnDuration(t *testing.T) {
 	}
 	if p.Skipped["system:something_new"] != 1 {
 		t.Errorf("Skipped = %v", p.Skipped)
+	}
+}
+
+func TestTruncateInvalidUTF8EarlyByteDoesNotWipePrefix(t *testing.T) {
+	s := `{"k":"` + "\xff" + strings.Repeat("a", 3000) + `"}`
+	got := truncate(s)
+	if len(got) < MaxContentBytes-utf8.UTFMax {
+		t.Fatalf("truncate destroyed content: len=%d, want ~%d", len(got), MaxContentBytes)
+	}
+	if len(got) > MaxContentBytes+len("…") {
+		t.Fatalf("truncate result too long: %d", len(got))
 	}
 }
