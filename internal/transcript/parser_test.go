@@ -86,3 +86,71 @@ func TestTimestampCarryAndProjectFromCWD(t *testing.T) {
 		t.Errorf("project = %q, want /home/u/proj", last.Project)
 	}
 }
+
+func TestUserPromptString(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"user","message":{"role":"user","content":"Fix the login bug please"},"timestamp":"2026-07-06T10:00:00.000Z","cwd":"/home/u/proj","sessionId":"sess-1"}`,
+	)
+	// session_started + user_prompt
+	if len(got) != 2 {
+		t.Fatalf("got %d events: %+v", len(got), got)
+	}
+	want := UserPromptPayload{Chars: 24, Text: "Fix the login bug please"}
+	if got[1].Type != UserPrompt || got[1].Payload.(UserPromptPayload) != want {
+		t.Errorf("got %+v, want %+v", got[1], want)
+	}
+}
+
+func TestUserToolResults(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"package main"},{"type":"tool_result","tool_use_id":"t2","content":[{"type":"text","text":"boom"}],"is_error":true}]},"timestamp":"2026-07-06T10:00:06.000Z","sessionId":"sess-1"}`,
+	)
+	if len(got) != 3 { // session_started + 2 tool_results
+		t.Fatalf("got %d events: %+v", len(got), got)
+	}
+	r1 := got[1].Payload.(ToolResultPayload)
+	r2 := got[2].Payload.(ToolResultPayload)
+	if !r1.OK || r1.Content != "package main" {
+		t.Errorf("r1 = %+v", r1)
+	}
+	if r2.OK || r2.Content != "boom" {
+		t.Errorf("r2 = %+v", r2)
+	}
+	if got[1].Seq != 1 || got[2].Seq != 2 {
+		t.Errorf("seq = %d, %d", got[1].Seq, got[2].Seq)
+	}
+}
+
+func TestUserTextBlocksBecomeOnePrompt(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"line one"},{"type":"text","text":"line two"}]},"sessionId":"sess-1"}`,
+	)
+	if len(got) != 2 {
+		t.Fatalf("got %+v", got)
+	}
+	pl := got[1].Payload.(UserPromptPayload)
+	if pl.Text != "line one\nline two" || pl.Chars != 17 {
+		t.Errorf("payload = %+v", pl)
+	}
+}
+
+func TestLongPromptTruncatedButCharsExact(t *testing.T) {
+	long := ""
+	for i := 0; i < 3000; i++ {
+		long += "a"
+	}
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"user","message":{"role":"user","content":"`+long+`"},"sessionId":"sess-1"}`,
+	)
+	pl := got[1].Payload.(UserPromptPayload)
+	if pl.Chars != 3000 {
+		t.Errorf("Chars = %d, want 3000", pl.Chars)
+	}
+	if len(pl.Text) != MaxContentBytes+len("…") {
+		t.Errorf("len(Text) = %d, want %d", len(pl.Text), MaxContentBytes+len("…"))
+	}
+}

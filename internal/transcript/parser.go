@@ -77,6 +77,8 @@ func (p *Parser) Line(offset int64, data []byte) []Event {
 		payloads = append(payloads, SessionTitlePayload{Title: rl.AITitle})
 	case "permission-mode":
 		payloads = append(payloads, PermissionModePayload{Mode: rl.PermissionMode})
+	case "user":
+		payloads = append(payloads, p.userPayloads(rl)...)
 	default:
 		p.Skipped[rl.Type]++
 	}
@@ -107,4 +109,93 @@ func truncate(s string) string {
 		cut = cut[:len(cut)-1]
 	}
 	return cut + "…"
+}
+
+// rawMessage covers .message on user and assistant lines.
+type rawMessage struct {
+	Role       string          `json:"role"`
+	Model      string          `json:"model"`
+	StopReason string          `json:"stop_reason"`
+	Usage      struct {
+		InputTokens              int64 `json:"input_tokens"`
+		OutputTokens             int64 `json:"output_tokens"`
+		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	} `json:"usage"`
+	Content json.RawMessage `json:"content"` // string or []rawBlock
+}
+
+// rawBlock covers content blocks on user and assistant messages, and the
+// blocks inside a tool_result's own content array.
+type rawBlock struct {
+	Type    string          `json:"type"`
+	Text    string          `json:"text"`
+	Name    string          `json:"name"`
+	Input   json.RawMessage `json:"input"`
+	Content json.RawMessage `json:"content"`
+	IsError bool            `json:"is_error"`
+}
+
+func (p *Parser) userPayloads(rl rawLine) []Payload {
+	var msg rawMessage
+	if err := json.Unmarshal(rl.Message, &msg); err != nil {
+		p.Skipped["user:badmessage"]++
+		return nil
+	}
+	// A plain string content is a human prompt.
+	var s string
+	if err := json.Unmarshal(msg.Content, &s); err == nil {
+		return []Payload{UserPromptPayload{Chars: utf8.RuneCountInString(s), Text: truncate(s)}}
+	}
+	var blocks []rawBlock
+	if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+		p.Skipped["user:badcontent"]++
+		return nil
+	}
+	var out []Payload
+	var text bytes.Buffer
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if text.Len() > 0 {
+				text.WriteByte('\n')
+			}
+			text.WriteString(b.Text)
+		case "tool_result":
+			out = append(out, ToolResultPayload{OK: !b.IsError, Content: truncate(flattenContent(b.Content))})
+		default:
+			p.Skipped["user:block:"+b.Type]++
+		}
+	}
+	if text.Len() > 0 {
+		prompt := UserPromptPayload{Chars: utf8.RuneCountInString(text.String()), Text: truncate(text.String())}
+		out = append([]Payload{prompt}, out...)
+	}
+	return out
+}
+
+// flattenContent renders a tool_result content field (string, or array of
+// text blocks) to plain text.
+func flattenContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []rawBlock
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var buf bytes.Buffer
+	for _, b := range blocks {
+		if b.Type == "text" {
+			if buf.Len() > 0 {
+				buf.WriteByte('\n')
+			}
+			buf.WriteString(b.Text)
+		}
+	}
+	return buf.String()
 }
