@@ -16,12 +16,13 @@ import (
 )
 
 type Spool struct {
-	dir      string
-	segMax   int64
-	totalMax int64
-	cur      *os.File
-	curSize  int64
-	curIndex int
+	dir       string
+	segMax    int64
+	totalMax  int64
+	cur       *os.File
+	curSize   int64
+	curIndex  int
+	EvictErrs int // eviction failures (old data not removed); the line writes themselves succeeded
 }
 
 func Open(dir string, segMaxBytes, totalMaxBytes int64) (*Spool, error) {
@@ -33,9 +34,11 @@ func Open(dir string, segMaxBytes, totalMaxBytes int64) (*Spool, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(segs) > 0 {
-		last := filepath.Base(segs[len(segs)-1])
-		fmt.Sscanf(last, "spool-%08d.jsonl", &s.curIndex)
+	for _, seg := range segs {
+		var n int
+		if _, err := fmt.Sscanf(filepath.Base(seg), "spool-%08d.jsonl", &n); err == nil && n > s.curIndex {
+			s.curIndex = n
+		}
 	}
 	if err := s.rotate(); err != nil {
 		return nil, err
@@ -61,22 +64,37 @@ func (s *Spool) rotate() error {
 }
 
 // Append writes one event line and enforces rotation + the total-size
-// cap. It returns how many previously spooled event lines were dropped
-// to stay under the cap (0 in the normal case).
+// cap. The returned error refers to persisting THIS line; eviction
+// problems are counted in EvictErrs instead (an eviction failure means
+// old data was NOT removed — the new line itself is safely on disk).
+// It returns how many previously spooled event lines were dropped to
+// stay under the cap (0 in the normal case).
 func (s *Spool) Append(line []byte) (evicted int, err error) {
 	if s.curSize >= s.segMax {
 		if err := s.rotate(); err != nil {
 			return 0, err
 		}
 	}
-	if _, err := s.cur.Write(line); err != nil {
+	buf := make([]byte, 0, len(line)+1)
+	buf = append(buf, line...)
+	buf = append(buf, '\n')
+	n, err := s.cur.Write(buf)
+	s.curSize += int64(n)
+	if err != nil {
+		// A torn write may have left a partial line at this segment's
+		// tail. Poison the segment so the next Append rotates: the
+		// corruption stays confined to this segment's final line, which
+		// downstream JSONL readers treat as malformed-and-skipped.
+		if s.curSize < s.segMax {
+			s.curSize = s.segMax
+		}
 		return 0, err
 	}
-	if _, err := s.cur.Write([]byte{'\n'}); err != nil {
-		return 0, err
+	dropped, evictErr := s.evict()
+	if evictErr != nil {
+		s.EvictErrs++
 	}
-	s.curSize += int64(len(line)) + 1
-	return s.evict()
+	return dropped, nil
 }
 
 func (s *Spool) evict() (int, error) {

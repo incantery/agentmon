@@ -92,3 +92,23 @@ func TestOnlyCurrentSegmentNeverEvicted(t *testing.T) {
 		t.Fatalf("segments = %v", segs)
 	}
 }
+
+func TestEvictErrorDoesNotFailAppend(t *testing.T) {
+	dir := t.TempDir()
+	sp, _ := Open(dir, 12, 20) // tiny: rotation + eviction pressure fast
+	defer sp.Close()
+	sp.Append([]byte("0123456789ab")) // fills segment 1 (13 bytes)
+	sp.Append([]byte("12345"))        // rotates to segment 2, writes 6 bytes
+	// Make the directory unwritable so os.Remove (eviction) fails.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o755)
+	// Third append won't rotate (curSize=6 < segMax=12) but will trigger eviction.
+	if _, err := sp.Append([]byte("0123456789ab")); err != nil {
+		t.Fatalf("append must succeed even when eviction fails: %v", err)
+	}
+	if sp.EvictErrs == 0 {
+		t.Error("eviction failure not counted in EvictErrs")
+	}
+}
