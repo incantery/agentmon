@@ -20,6 +20,10 @@ import (
 type Options struct {
 	StaticLabels map[string]string
 	Now          func() time.Time
+	// Logf, when set, receives one line per quarantine with the reason —
+	// a segment set aside silently is invisible data loss waiting to be
+	// misread. Defaults to a no-op.
+	Logf func(format string, args ...any)
 }
 
 type Drainer struct {
@@ -39,6 +43,9 @@ func New(sp *spool.Spool, cl *loki.Client, opts Options) *Drainer {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	if opts.Logf == nil {
+		opts.Logf = func(string, ...any) {}
+	}
 	return &Drainer{sp: sp, cl: cl, opts: opts}
 }
 
@@ -56,14 +63,14 @@ func (d *Drainer) DrainOnce() (shipped int, err error) {
 			if os.IsNotExist(err) {
 				continue // evicted between listing and read: nothing to do
 			}
-			d.quarantine(seg)
+			d.quarantine(seg, err)
 			continue
 		}
 		if len(streams) == 0 {
 			// Distinguish "nothing there" from "nothing decodable":
 			// deleting undecodable bytes would be silent data loss.
 			if hasContent {
-				d.quarantine(seg) // undecodable bytes: leave a trail
+				d.quarantine(seg, errors.New("no decodable event lines")) // leave a trail
 				continue
 			}
 			if err := d.sp.Ack(seg); err != nil {
@@ -75,7 +82,7 @@ func (d *Drainer) DrainOnce() (shipped int, err error) {
 		if err := d.cl.Push(streams); err != nil {
 			var perm *loki.PermanentError
 			if errors.As(err, &perm) {
-				d.quarantine(seg)
+				d.quarantine(seg, perm)
 				continue
 			}
 			return shipped, err
@@ -88,7 +95,8 @@ func (d *Drainer) DrainOnce() (shipped int, err error) {
 	return shipped, nil
 }
 
-func (d *Drainer) quarantine(seg string) {
+func (d *Drainer) quarantine(seg string, reason error) {
+	d.opts.Logf("quarantining %s: %v", seg, reason)
 	if err := os.Rename(seg, seg+".rej"); err != nil {
 		// The segment stays in place and will be retried next pass;
 		// surface the failure instead of inflating Quarantined.

@@ -159,7 +159,7 @@ func runWatch(stdout, stderr io.Writer, f watchFlags) error {
 	}, st, sink)
 	var dr *drain.Drainer
 	if !f.dryRun && f.lokiURL != "" {
-		dr = drain.New(sp, loki.New(f.lokiURL, f.lokiTenant), drain.Options{StaticLabels: f.lokiLabels})
+		dr = drain.New(sp, loki.New(f.lokiURL, f.lokiTenant), drain.Options{StaticLabels: f.lokiLabels, Logf: func(format string, args ...any) { fmt.Fprintf(stderr, "agentmon: "+format+"\n", args...) }})
 	}
 	if f.once {
 		err := w.PollOnce()

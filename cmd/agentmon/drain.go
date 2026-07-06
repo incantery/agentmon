@@ -32,7 +32,7 @@ func runDrain(stdout, stderr io.Writer, cfg config.Config, once bool) error {
 		return err
 	}
 	defer sp.Close()
-	d := drain.New(sp, loki.New(cfg.Loki.URL, cfg.Loki.Tenant), drain.Options{StaticLabels: cfg.Loki.Labels})
+	d := drain.New(sp, loki.New(cfg.Loki.URL, cfg.Loki.Tenant), drain.Options{StaticLabels: cfg.Loki.Labels, Logf: func(format string, args ...any) { fmt.Fprintf(stderr, "agentmon: "+format+"\n", args...) }})
 	pass := func() error {
 		shipped, err := d.DrainOnce()
 		if shipped > 0 || d.Quarantined > 0 {
