@@ -31,6 +31,8 @@ type Drainer struct {
 	// *.rej beside the spool — preserved for manual recovery, never
 	// silently dropped, never blocking the queue.
 	Quarantined int
+	// QuarantineErrs counts failed quarantine renames (segment left in place, retried next pass).
+	QuarantineErrs int
 }
 
 func New(sp *spool.Spool, cl *loki.Client, opts Options) *Drainer {
@@ -54,15 +56,26 @@ func (d *Drainer) DrainOnce() (shipped int, err error) {
 			d.quarantine(seg)
 			continue
 		}
-		if len(streams) > 0 {
-			if err := d.cl.Push(streams); err != nil {
-				var perm *loki.PermanentError
-				if errors.As(err, &perm) {
-					d.quarantine(seg)
-					continue
-				}
+		if len(streams) == 0 {
+			// Distinguish "nothing there" from "nothing decodable":
+			// deleting undecodable bytes would be silent data loss.
+			if fi, statErr := os.Stat(seg); statErr == nil && fi.Size() > 0 {
+				d.quarantine(seg)
+				continue
+			}
+			if err := d.sp.Ack(seg); err != nil {
 				return shipped, err
 			}
+			shipped++
+			continue
+		}
+		if err := d.cl.Push(streams); err != nil {
+			var perm *loki.PermanentError
+			if errors.As(err, &perm) {
+				d.quarantine(seg)
+				continue
+			}
+			return shipped, err
 		}
 		if err := d.sp.Ack(seg); err != nil {
 			return shipped, err
@@ -73,8 +86,13 @@ func (d *Drainer) DrainOnce() (shipped int, err error) {
 }
 
 func (d *Drainer) quarantine(seg string) {
+	if err := os.Rename(seg, seg+".rej"); err != nil {
+		// The segment stays in place and will be retried next pass;
+		// surface the failure instead of inflating Quarantined.
+		d.QuarantineErrs++
+		return
+	}
 	d.Quarantined++
-	_ = os.Rename(seg, seg+".rej")
 }
 
 // segmentStreams groups a segment's lines into Loki streams keyed by
@@ -128,7 +146,7 @@ func (d *Drainer) segmentStreams(path string) ([]loki.Stream, error) {
 	out := make([]loki.Stream, 0, len(keys))
 	for _, k := range keys {
 		st := byKey[k]
-		sort.Slice(st.Entries, func(i, j int) bool { return st.Entries[i].TS.Before(st.Entries[j].TS) })
+		sort.SliceStable(st.Entries, func(i, j int) bool { return st.Entries[i].TS.Before(st.Entries[j].TS) })
 		out = append(out, *st)
 	}
 	return out, nil

@@ -170,3 +170,51 @@ func TestMalformedTailSkipped(t *testing.T) {
 		t.Fatalf("shipped=%d err=%v", shipped, err)
 	}
 }
+
+func TestFullyCorruptSegmentQuarantinedNotAcked(t *testing.T) {
+	cap := &capture{status: http.StatusNoContent}
+	srv := httptest.NewServer(cap.handler())
+	defer srv.Close()
+	sp := newSpoolWith(t, `{torn`, `also not json`)
+	defer sp.Close()
+	d := New(sp, loki.New(srv.URL, ""), Options{})
+	shipped, err := d.DrainOnce()
+	if err != nil || shipped != 0 {
+		t.Fatalf("shipped=%d err=%v", shipped, err)
+	}
+	if len(cap.bodies) != 0 {
+		t.Error("no push should happen for a zero-stream segment")
+	}
+	if d.Quarantined != 1 {
+		t.Errorf("Quarantined = %d, want 1 (corrupt bytes must leave a trail)", d.Quarantined)
+	}
+	closed, _ := sp.ClosedSegments()
+	if len(closed) != 0 {
+		t.Fatalf("corrupt segment still queued: %v", closed)
+	}
+}
+
+func TestEmptySegmentAckedSilently(t *testing.T) {
+	dir := t.TempDir()
+	sp, _ := spool.Open(dir, 1<<20, 1<<30)
+	defer sp.Close()
+	// a genuinely empty segment (e.g. crash between create and write)
+	if err := os.WriteFile(filepath.Join(dir, "spool-00000001.jsonl"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cap := &capture{status: http.StatusNoContent}
+	srv := httptest.NewServer(cap.handler())
+	defer srv.Close()
+	d := New(sp, loki.New(srv.URL, ""), Options{})
+	shipped, err := d.DrainOnce()
+	if err != nil || shipped != 1 {
+		t.Fatalf("shipped=%d err=%v", shipped, err)
+	}
+	if d.Quarantined != 0 || len(cap.bodies) != 0 {
+		t.Errorf("empty segment must ack silently: q=%d pushes=%d", d.Quarantined, len(cap.bodies))
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Errorf("dir not empty: %v", entries)
+	}
+}
