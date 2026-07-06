@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: agentmon
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: loki }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: loki }
+    spec:
+      containers:
+        - name: loki
+          image: grafana/loki:3.1.1
+          args: ["-config.file=/etc/loki/config.yaml"]
+          ports:
+            - containerPort: 3100
+          volumeMounts:
+            - { name: config, mountPath: /etc/loki }
+            - { name: data, mountPath: /loki }
+          readinessProbe:
+            httpGet: { path: /ready, port: 3100 }
+            initialDelaySeconds: 15
+      volumes:
+        - name: config
+          configMap: { name: loki-config }
+        - name: data
+          persistentVolumeClaim: { claimName: loki-data }

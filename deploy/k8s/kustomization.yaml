@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agentmon
+resources:
+  - namespace.yaml
+  - loki/deployment.yaml
+  - loki/service.yaml
+  - loki/pvc.yaml
+  - grafana/deployment.yaml
+  - grafana/service.yaml
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: loki-config
+    files:
+      - config.yaml=loki/config.yaml
+  - name: grafana-datasources
+    files:
+      - grafana/provisioning/datasources/loki.yaml
+  - name: grafana-dashboards-provider
+    files:
+      - grafana/provisioning/dashboards/provider.yaml
+  - name: grafana-alerting
+    files:
+      - grafana/provisioning/alerting/alerting.yaml
+  - name: grafana-dashboard-agentmon
+    files:
+      - grafana/dashboards/agentmon.json

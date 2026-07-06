@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: agentmon
+    folder: agentmon
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
