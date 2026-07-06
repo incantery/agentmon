@@ -1,6 +1,10 @@
 auth_enabled: false
 server:
   http_listen_port: 3100
+  # agentmon pushes one spool segment per request; headroom over the 4MB
+  # default so a full segment (plus JSON overhead) always fits.
+  grpc_server_max_recv_msg_size: 16777216
+  grpc_server_max_send_msg_size: 16777216
 common:
   instance_addr: 127.0.0.1
   path_prefix: /loki

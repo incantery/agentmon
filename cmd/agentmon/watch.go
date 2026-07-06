@@ -138,7 +138,7 @@ func runWatch(stdout, stderr io.Writer, f watchFlags) error {
 			return err
 		}
 		defer release()
-		sp, err = spool.Open(f.spoolDir, 4<<20, f.spoolMaxMB<<20)
+		sp, err = spool.Open(f.spoolDir, spool.DefaultSegmentBytes, f.spoolMaxMB<<20)
 		if err != nil {
 			return err
 		}

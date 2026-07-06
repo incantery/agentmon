@@ -27,7 +27,7 @@ func runDrain(stdout, stderr io.Writer, cfg config.Config, once bool) error {
 		return err
 	}
 	defer release()
-	sp, err := spool.Open(cfg.Watch.SpoolDir, 4<<20, cfg.Watch.SpoolMaxMB<<20)
+	sp, err := spool.Open(cfg.Watch.SpoolDir, spool.DefaultSegmentBytes, cfg.Watch.SpoolMaxMB<<20)
 	if err != nil {
 		return err
 	}

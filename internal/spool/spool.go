@@ -31,6 +31,10 @@ type Spool struct {
 // Open prepares the spool directory but does not create a segment file —
 // the first Append opens one lazily. This keeps a drain-only process
 // (which never appends) from littering empty segment files.
+// DefaultSegmentBytes keeps a whole-segment Loki push (segment bytes plus
+// JSON envelope overhead) comfortably under common servers' 4MB message cap.
+const DefaultSegmentBytes = 1 << 20
+
 func Open(dir string, segMaxBytes, totalMaxBytes int64) (*Spool, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
