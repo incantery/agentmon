@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -53,5 +55,25 @@ func TestParseMetadataLevelStripsContent(t *testing.T) {
 	// the session title is explicitly allowed at metadata level (spec)
 	if !strings.Contains(s, "Fix the login bug\"") {
 		t.Errorf("session title should survive metadata level:\n%s", s)
+	}
+}
+
+func TestParseFileWithoutTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nofinalnl.jsonl")
+	content := `{"type":"ai-title","aiTitle":"no trailing newline","sessionId":"nofinalnl"}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if err := runParse(&out, &errb, path, redact.Full); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 { // session_started + session_title from the undelimited final line
+		t.Fatalf("got %d event lines, want 2:\n%s", len(lines), out.String())
+	}
+	if !strings.Contains(lines[1], `"title":"no trailing newline"`) {
+		t.Errorf("second event: %s", lines[1])
 	}
 }
