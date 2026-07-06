@@ -189,11 +189,13 @@ func runWatch(stdout, stderr io.Writer, f watchFlags) error {
 			}
 		}()
 	}
-	if err := w.Run(ctx, f.interval); err != nil && err != context.Canceled {
-		return err
-	}
+	runErr := w.Run(ctx, f.interval)
+	stop() // cancel ctx so the drain goroutine exits even on hard errors
 	if drainDone != nil {
 		<-drainDone
+	}
+	if runErr != nil && runErr != context.Canceled {
+		return runErr
 	}
 	return nil
 }
