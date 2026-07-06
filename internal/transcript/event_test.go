@@ -51,3 +51,21 @@ func TestEveryEventTypeHasExactlyOnePayload(t *testing.T) {
 		t.Errorf("AllPayloads has %d entries, AllEventTypes has %d", len(AllPayloads()), len(AllEventTypes))
 	}
 }
+
+func TestWatcherEventTypesRegistered(t *testing.T) {
+	for _, et := range []EventType{SessionIdle, SessionEnded, SpoolEvicted} {
+		found := false
+		for _, x := range AllEventTypes {
+			if x == et {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s missing from AllEventTypes", et)
+		}
+	}
+	b, err := json.Marshal(SessionEndedPayload{Reason: "inactive"})
+	if err != nil || string(b) != `{"reason":"inactive"}` {
+		t.Errorf("SessionEndedPayload JSON = %s, %v", b, err)
+	}
+}

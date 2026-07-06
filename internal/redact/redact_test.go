@@ -24,7 +24,7 @@ func TestValid(t *testing.T) {
 // content and may survive metadata level. Everything else must be cleared.
 var allowedStrings = map[string]bool{
 	"Title": true, "Model": true, "StopReason": true,
-	"Mode": true, "CWD": true, "Name": true,
+	"Mode": true, "CWD": true, "Name": true, "Reason": true,
 }
 
 // Scope: this walks flat string fields only. A future payload carrying
