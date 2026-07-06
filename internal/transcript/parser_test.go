@@ -209,3 +209,22 @@ func TestAssistantTextOnly(t *testing.T) {
 		t.Errorf("assistant_message = %+v", am)
 	}
 }
+
+func TestAssistantLineSkipCounters(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"assistant","message":"not an object","sessionId":"sess-1"}`,
+		`{"type":"assistant","message":{"model":"m","role":"assistant","content":[{"type":"server_tool_use","name":"x"},{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":2}},"sessionId":"sess-1"}`,
+	)
+	// session_started + one assistant_message (from the second line)
+	if len(got) != 2 || got[1].Type != AssistantMessage {
+		t.Fatalf("got %+v", got)
+	}
+	am := got[1].Payload.(AssistantMessagePayload)
+	if am.Text != "ok" || am.InputTokens != 1 {
+		t.Errorf("assistant_message = %+v", am)
+	}
+	if p.Skipped["assistant:badmessage"] != 1 || p.Skipped["assistant:block:server_tool_use"] != 1 {
+		t.Errorf("Skipped = %v", p.Skipped)
+	}
+}
