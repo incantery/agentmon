@@ -107,5 +107,9 @@ func (s *State) Save() error {
 		os.Remove(tmp.Name())
 		return err
 	}
-	return os.Rename(tmp.Name(), s.path)
+	if err := os.Rename(tmp.Name(), s.path); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return nil
 }
