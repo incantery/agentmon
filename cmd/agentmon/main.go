@@ -77,11 +77,13 @@ func main() {
 		fs.String("config", config.DefaultPath(), "config file (already applied; here for -h)")
 		once := fs.Bool("once", false, "drain once and exit")
 		lokiURL := fs.String("loki-url", cfg.Loki.URL, "Loki base URL")
+		spoolDir := fs.String("spool-dir", cfg.Watch.SpoolDir, "spool directory")
 		fs.Parse(os.Args[2:])
 		if fs.NArg() != 0 {
 			usage()
 		}
 		cfg.Loki.URL = *lokiURL
+		cfg.Watch.SpoolDir = *spoolDir
 		if err := runDrain(os.Stdout, os.Stderr, cfg, *once); err != nil {
 			fmt.Fprintln(os.Stderr, "agentmon:", err)
 			os.Exit(1)

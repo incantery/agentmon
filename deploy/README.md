@@ -34,6 +34,11 @@ before relying on it, then subscribe to that topic in the ntfy app.
 
 - Loki accepts old timestamps (`reject_old_samples: false`) so
   `agentmon watch --backfill` can seed history.
-- Grafana state is ephemeral (emptyDir) by design: everything that
-  matters is provisioned from this directory. `tilt down` removes it all;
-  Loki data survives on its PVC.
+- Grafana state is ephemeral (container layer — it dies on any pod
+  restart); everything that matters is provisioned from this directory.
+  `tilt down` removes it all; Loki data survives on its PVC.
+- After editing provisioning ConfigMaps, restart the pod (`tilt trigger
+  grafana` or delete the pod) — generated ConfigMaps don't auto-restart
+  deployments.
+- Loki is configured without retention enforcement (no compactor); add a
+  retention_period + compactor stanza when volume warrants.

@@ -22,6 +22,11 @@ func runDrain(stdout, stderr io.Writer, cfg config.Config, once bool) error {
 	if cfg.Loki.URL == "" {
 		return fmt.Errorf("no [loki] url configured (%s)", config.DefaultPath())
 	}
+	release, err := spool.AcquireLock(cfg.Watch.SpoolDir)
+	if err != nil {
+		return err
+	}
+	defer release()
 	sp, err := spool.Open(cfg.Watch.SpoolDir, 4<<20, cfg.Watch.SpoolMaxMB<<20)
 	if err != nil {
 		return err
@@ -31,7 +36,7 @@ func runDrain(stdout, stderr io.Writer, cfg config.Config, once bool) error {
 	pass := func() error {
 		shipped, err := d.DrainOnce()
 		if shipped > 0 || d.Quarantined > 0 {
-			fmt.Fprintf(stdout, "shipped %d segment(s), quarantined %d\n", shipped, d.Quarantined)
+			fmt.Fprintf(stderr, "shipped %d segment(s), quarantined %d\n", shipped, d.Quarantined)
 		}
 		return err
 	}

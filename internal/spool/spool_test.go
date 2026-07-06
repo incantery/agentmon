@@ -203,6 +203,23 @@ func TestConcurrentAppendAndDrainOps(t *testing.T) {
 	<-done
 }
 
+func TestAcquireLockExcludesSecondHolder(t *testing.T) {
+	dir := t.TempDir()
+	release, err := AcquireLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireLock(dir); err == nil {
+		t.Fatal("second AcquireLock must fail while the first holds")
+	}
+	release()
+	release2, err := AcquireLock(dir)
+	if err != nil {
+		t.Fatalf("lock not released: %v", err)
+	}
+	release2()
+}
+
 func TestAckOfAlreadyEvictedSegmentSucceeds(t *testing.T) {
 	sp, _ := Open(t.TempDir(), 1<<20, 1<<30)
 	defer sp.Close()

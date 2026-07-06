@@ -100,6 +100,39 @@ func TestDrainShipsAndAcks(t *testing.T) {
 	}
 }
 
+func TestReservedLabelsWinOverStaticExtras(t *testing.T) {
+	cap := &capture{status: http.StatusNoContent}
+	srv := httptest.NewServer(cap.handler())
+	defer srv.Close()
+	sp := newSpoolWith(t, evA)
+	defer sp.Close()
+	d := New(sp, loki.New(srv.URL, ""), Options{
+		StaticLabels: map[string]string{"type": "evil", "env": "lab"},
+	})
+	shipped, err := d.DrainOnce()
+	if err != nil || shipped != 1 {
+		t.Fatalf("shipped=%d err=%v", shipped, err)
+	}
+	var body struct {
+		Streams []struct {
+			Stream map[string]string `json:"stream"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(cap.bodies[0], &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Streams) != 1 {
+		t.Fatalf("streams: %d", len(body.Streams))
+	}
+	s := body.Streams[0].Stream
+	if s["type"] != "session_started" {
+		t.Errorf("reserved label 'type' clobbered by static extra: %v", s)
+	}
+	if s["env"] != "lab" {
+		t.Errorf("non-reserved static extra lost: %v", s)
+	}
+}
+
 func TestRetryableErrorStopsAndKeepsSegments(t *testing.T) {
 	cap := &capture{status: http.StatusInternalServerError}
 	srv := httptest.NewServer(cap.handler())

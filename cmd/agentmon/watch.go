@@ -63,7 +63,7 @@ func watchFlagsFrom(cfg config.Config) watchFlags {
 func configPathFromArgs(args []string) string {
 	for i, a := range args {
 		if a == "--config" || a == "-config" {
-			if i+1 < len(args) {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				return args[i+1]
 			}
 		}
@@ -91,6 +91,11 @@ type spoolSink struct {
 }
 
 func (s *spoolSink) Emit(ev transcript.Event) error {
+	if ev.TS.IsZero() {
+		// Stamp once at write time: the spooled line must carry a stable
+		// timestamp so retried pushes stay byte-identical (Loki dedupe).
+		ev.TS = time.Now().UTC()
+	}
 	b, err := json.Marshal(ev)
 	if err != nil {
 		return err
@@ -128,7 +133,11 @@ func runWatch(stdout, stderr io.Writer, f watchFlags) error {
 		sink = jsonSink{enc: json.NewEncoder(stdout)}
 		statePath = "" // in-memory: dry-run touches nothing on disk
 	} else {
-		var err error
+		release, err := spool.AcquireLock(f.spoolDir)
+		if err != nil {
+			return err
+		}
+		defer release()
 		sp, err = spool.Open(f.spoolDir, 4<<20, f.spoolMaxMB<<20)
 		if err != nil {
 			return err
@@ -158,7 +167,9 @@ func runWatch(stdout, stderr io.Writer, f watchFlags) error {
 			fmt.Fprintf(stderr, "errors: file=%d sink=%d\n", w.FileErrs, w.SinkErrs)
 		}
 		if dr != nil {
-			sp.Rotate()
+			if err := sp.Rotate(); err != nil {
+				fmt.Fprintln(stderr, "agentmon: rotate:", err)
+			}
 			shipped, drErr := dr.DrainOnce()
 			if drErr != nil {
 				fmt.Fprintln(stderr, "agentmon: drain:", drErr)
@@ -181,7 +192,9 @@ func runWatch(stdout, stderr io.Writer, f watchFlags) error {
 				case <-ctx.Done():
 					return
 				case <-tick.C:
-					sp.Rotate()
+					if err := sp.Rotate(); err != nil {
+						fmt.Fprintln(stderr, "agentmon: rotate:", err)
+					}
 					if _, err := dr.DrainOnce(); err != nil {
 						fmt.Fprintln(stderr, "agentmon: drain:", err)
 					}

@@ -59,7 +59,8 @@ file for resuming across restarts. Flags:
 
 When `[loki].url` is set (via `--config`, see below), `watch` drains the spool
 to Loki every 10s; `agentmon drain --once` ships whatever's spooled manually,
-without a `watch` running.
+without a `watch` running. `agentmon drain` refuses to run while a `watch` on
+the same spool holds its lock (watch already drains that spool on its own).
 
 ## Config
 

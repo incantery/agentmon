@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/incantery/agentmon/internal/config"
+	"github.com/incantery/agentmon/internal/spool"
+	"github.com/incantery/agentmon/internal/transcript"
 )
 
 func TestWatchDryRunOnce(t *testing.T) {
@@ -74,7 +76,17 @@ func TestWatchSpoolsWhenNotDryRun(t *testing.T) {
 	if _, err := os.Stat(f.stateFile); err != nil {
 		t.Errorf("state not persisted: %v", err)
 	}
-	data, _ := os.ReadFile(filepath.Join(f.spoolDir, entries[0].Name()))
+	var segName string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jsonl") {
+			segName = e.Name()
+			break
+		}
+	}
+	if segName == "" {
+		t.Fatalf("no .jsonl segment among spool entries: %v", entries)
+	}
+	data, _ := os.ReadFile(filepath.Join(f.spoolDir, segName))
 	if !strings.Contains(string(data), `"type":"session_started"`) {
 		t.Errorf("spool content: %s", data)
 	}
@@ -124,6 +136,42 @@ func TestWatchOnceDrainsToLokiStub(t *testing.T) {
 	}
 }
 
+func TestSpoolSinkStampsZeroTSAtWriteTime(t *testing.T) {
+	dir := t.TempDir()
+	sp, err := spool.Open(dir, 1<<20, 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp.Close()
+	sink := &spoolSink{sp: sp, machine: "testbox"}
+	ev := transcript.Event{
+		Machine:   "testbox",
+		SessionID: "s1",
+		Type:      transcript.SessionTitle,
+		Payload:   transcript.SessionTitlePayload{Title: "T"},
+	}
+	if ev.TS.IsZero() != true {
+		t.Fatal("test setup: event TS must start zero")
+	}
+	if err := sink.Emit(ev); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Rotate(); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := sp.ClosedSegments()
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("segs=%v err=%v", segs, err)
+	}
+	data, err := os.ReadFile(segs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"ts":`) {
+		t.Errorf("zero-TS event was not stamped before spooling: %s", data)
+	}
+}
+
 func TestConfigPathFromArgs(t *testing.T) {
 	if got := configPathFromArgs([]string{"--config", "/x/c.toml", "--once"}); got != "/x/c.toml" {
 		t.Errorf("got %q", got)
@@ -133,5 +181,8 @@ func TestConfigPathFromArgs(t *testing.T) {
 	}
 	if got := configPathFromArgs([]string{"--once"}); got == "" {
 		t.Error("must fall back to default path")
+	}
+	if got, want := configPathFromArgs([]string{"--config", "--once"}), config.DefaultPath(); got != want {
+		t.Errorf("--config followed by a flag must fall back to default path, got %q want %q", got, want)
 	}
 }

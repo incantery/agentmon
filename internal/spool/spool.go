@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 type Spool struct {
@@ -205,6 +206,28 @@ func (s *Spool) Ack(path string) error {
 		return err
 	}
 	return nil
+}
+
+// AcquireLock takes an exclusive advisory lock on dir (via dir/.lock),
+// guarding the spool against a second writer or a concurrent standalone
+// drainer — the cross-process analogue of the in-process mutex. Returns
+// a release func, or an error if another process holds the lock.
+func AcquireLock(dir string) (func(), error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("spool at %s is locked by another agentmon process (watch already drains every tick): %w", dir, err)
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 func (s *Spool) Close() error {

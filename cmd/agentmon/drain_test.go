@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/incantery/agentmon/internal/config"
@@ -36,8 +37,12 @@ func TestDrainOnceStandalone(t *testing.T) {
 		t.Errorf("pushes = %d", pushed)
 	}
 	entries, _ := os.ReadDir(spoolDir)
-	if len(entries) != 0 {
-		t.Errorf("spool not drained: %v", entries)
+	for _, e := range entries {
+		// AcquireLock's dir/.lock is expected to remain — only segments
+		// (spool-*.jsonl) indicate an undrained spool.
+		if strings.HasSuffix(e.Name(), ".jsonl") {
+			t.Errorf("spool not drained: %v", entries)
+		}
 	}
 }
 
@@ -47,5 +52,21 @@ func TestDrainWithoutLokiURLErrors(t *testing.T) {
 	var out, errb bytes.Buffer
 	if err := runDrain(&out, &errb, cfg, true); err == nil {
 		t.Error("drain without [loki].url must error")
+	}
+}
+
+func TestDrainRefusesWhenSpoolLocked(t *testing.T) {
+	spoolDir := t.TempDir()
+	release, err := spool.AcquireLock(spoolDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	cfg := config.Default()
+	cfg.Watch.SpoolDir = spoolDir
+	cfg.Loki.URL = "http://127.0.0.1:1"
+	var out, errb bytes.Buffer
+	if err := runDrain(&out, &errb, cfg, true); err == nil {
+		t.Error("drain must refuse a locked spool")
 	}
 }

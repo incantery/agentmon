@@ -51,16 +51,19 @@ func (d *Drainer) DrainOnce() (shipped int, err error) {
 		return 0, err
 	}
 	for _, seg := range segs {
-		streams, err := d.segmentStreams(seg)
+		streams, hasContent, err := d.segmentStreams(seg)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue // evicted between listing and read: nothing to do
+			}
 			d.quarantine(seg)
 			continue
 		}
 		if len(streams) == 0 {
 			// Distinguish "nothing there" from "nothing decodable":
 			// deleting undecodable bytes would be silent data loss.
-			if fi, statErr := os.Stat(seg); statErr == nil && fi.Size() > 0 {
-				d.quarantine(seg)
+			if hasContent {
+				d.quarantine(seg) // undecodable bytes: leave a trail
 				continue
 			}
 			if err := d.sp.Ack(seg); err != nil {
@@ -97,10 +100,13 @@ func (d *Drainer) quarantine(seg string) {
 
 // segmentStreams groups a segment's lines into Loki streams keyed by
 // (machine, type). Lines are NOT re-marshaled — they ship byte-identical.
-func (d *Drainer) segmentStreams(path string) ([]loki.Stream, error) {
+// hasContent reports whether any non-whitespace bytes were seen, decodable
+// or not — it lets the caller distinguish a genuinely empty segment from
+// one full of undecodable bytes without a second stat/read of the file.
+func (d *Drainer) segmentStreams(path string) (streams []loki.Stream, hasContent bool, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	type minimal struct {
 		Machine string    `json:"machine"`
@@ -114,6 +120,7 @@ func (d *Drainer) segmentStreams(path string) ([]loki.Stream, error) {
 		if len(line) == 0 {
 			continue
 		}
+		hasContent = true
 		var m minimal
 		if err := json.Unmarshal(line, &m); err != nil {
 			continue // torn tail from a poisoned segment: skip, not fatal
@@ -126,10 +133,15 @@ func (d *Drainer) segmentStreams(path string) ([]loki.Stream, error) {
 			ts = d.opts.Now()
 		}
 		lastTS = ts
-		labels := map[string]string{"job": "agentmon", "machine": m.Machine, "type": m.Type}
+		// Static extras first, so the reserved labels below always win —
+		// a misconfigured [loki.labels] can't clobber job/machine/type.
+		labels := map[string]string{}
 		for k, v := range d.opts.StaticLabels {
 			labels[k] = v
 		}
+		labels["job"] = "agentmon"
+		labels["machine"] = m.Machine
+		labels["type"] = m.Type
 		key := m.Machine + "\xff" + m.Type
 		st, ok := byKey[key]
 		if !ok {
@@ -149,5 +161,5 @@ func (d *Drainer) segmentStreams(path string) ([]loki.Stream, error) {
 		sort.SliceStable(st.Entries, func(i, j int) bool { return st.Entries[i].TS.Before(st.Entries[j].TS) })
 		out = append(out, *st)
 	}
-	return out, nil
+	return out, hasContent, nil
 }
