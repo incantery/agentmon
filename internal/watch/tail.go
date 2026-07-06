@@ -6,6 +6,7 @@ package watch
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +19,9 @@ import (
 type tail struct {
 	path      string
 	sessionID string
+	agentID   string // "" for main transcripts
+	agentType string // from the .meta.json sidecar, once read
+	metaDone  bool   // sidecar read (or not applicable); stop retrying
 	parser    *transcript.Parser
 	readPos   int64 // bytes fed to parser (complete lines only)
 	lastSize  int64 // size at previous poll, for activity detection
@@ -26,15 +30,37 @@ type tail struct {
 	synced    bool // parser state reflects file[0:readPos]
 }
 
+// deriveIdentity maps a transcript path to its session and agent identity.
+// Main transcripts (<project>/<sid>.jsonl) have agentID "". Subagent
+// transcripts live under a directory named after the parent session:
+//
+//	<project>/<sid>/subagents/agent-<id>.jsonl
+//	<project>/<sid>/subagents/workflows/<wf>/agent-<id>.jsonl
+//
+// and take the parent session's ID plus their own agent ID, so per-session
+// aggregations include the session's whole agent fleet.
+func deriveIdentity(path string) (sessionID, agentID string) {
+	base := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	parts := strings.Split(filepath.ToSlash(filepath.Dir(path)), "/")
+	for i := len(parts) - 1; i > 0; i-- {
+		if parts[i] == "subagents" {
+			return parts[i-1], base
+		}
+	}
+	return base, ""
+}
+
 // newTail resumes a file at a persisted watermark. knownSize is the file
 // size recorded when the watermark was saved: while the file still has
 // exactly that size there is nothing new, so nothing is parsed; the
 // first observed change triggers a replay from offset 0.
 func newTail(path string, mark state.Watermark, knownSize int64) *tail {
-	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	sessionID, agentID := deriveIdentity(path)
 	return &tail{
 		path:      path,
 		sessionID: sessionID,
+		agentID:   agentID,
+		metaDone:  agentID == "", // main transcripts have no sidecar
 		parser:    transcript.NewParser(sessionID),
 		readPos:   knownSize,
 		lastSize:  knownSize,
@@ -43,7 +69,29 @@ func newTail(path string, mark state.Watermark, knownSize int64) *tail {
 	}
 }
 
+// loadMeta reads the agent file's .meta.json sidecar for agentType. The
+// sidecar may appear after the transcript, so a missing file is retried
+// on every poll until it is read once. description and spawnDepth are
+// deliberately not shipped.
+func (t *tail) loadMeta() {
+	if t.metaDone {
+		return
+	}
+	b, err := os.ReadFile(strings.TrimSuffix(t.path, ".jsonl") + ".meta.json")
+	if err != nil {
+		return
+	}
+	t.metaDone = true
+	var m struct {
+		AgentType string `json:"agentType"`
+	}
+	if json.Unmarshal(b, &m) == nil {
+		t.agentType = m.AgentType
+	}
+}
+
 func (t *tail) poll() (events []transcript.Event, grew bool, err error) {
+	t.loadMeta()
 	fi, err := os.Stat(t.path)
 	if err != nil {
 		return nil, false, err

@@ -123,3 +123,47 @@ func TestPartialLineLeftForNextPoll(t *testing.T) {
 		t.Fatalf("completed line lost: %v", got)
 	}
 }
+
+func TestDeriveIdentity(t *testing.T) {
+	cases := []struct{ path, session, agent string }{
+		{"/r/proj/abc-123.jsonl", "abc-123", ""},
+		{"/r/proj/abc-123/subagents/agent-a1.jsonl", "abc-123", "agent-a1"},
+		{"/r/proj/abc-123/subagents/workflows/wf_x-1/agent-a2.jsonl", "abc-123", "agent-a2"},
+	}
+	for _, c := range cases {
+		s, a := deriveIdentity(c.path)
+		if s != c.session || a != c.agent {
+			t.Errorf("deriveIdentity(%q) = (%q,%q), want (%q,%q)", c.path, s, a, c.session, c.agent)
+		}
+	}
+}
+
+func TestAgentTailLoadsMetaLazily(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sess-1", "subagents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "agent-a1.jsonl")
+	write(t, path, line1)
+	tl := newTail(path, state.Watermark{}, 0)
+	if tl.sessionID != "sess-1" || tl.agentID != "agent-a1" {
+		t.Fatalf("identity = (%q,%q), want (sess-1, agent-a1)", tl.sessionID, tl.agentID)
+	}
+	// Sidecar not written yet: poll must succeed and leave agentType empty.
+	if _, _, err := tl.poll(); err != nil {
+		t.Fatal(err)
+	}
+	if tl.agentType != "" {
+		t.Fatalf("agentType = %q before sidecar exists", tl.agentType)
+	}
+	// Sidecar appears later (Claude Code may write it after the transcript):
+	// the next poll picks it up. description/spawnDepth are ignored.
+	write(t, filepath.Join(dir, "agent-a1.meta.json"),
+		`{"agentType":"general-purpose","description":"secret","spawnDepth":1}`)
+	if _, _, err := tl.poll(); err != nil {
+		t.Fatal(err)
+	}
+	if tl.agentType != "general-purpose" {
+		t.Fatalf("agentType = %q, want general-purpose", tl.agentType)
+	}
+}
