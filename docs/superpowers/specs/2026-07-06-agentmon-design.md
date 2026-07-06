@@ -79,7 +79,13 @@ At-least-once, server-side idempotent. Events carry identity
 `(machine, session_id, offset, seq)` — `offset` is the byte offset of the source
 line (timer-derived events reuse the last-seen offset) and `seq` is the index of
 the event within that line's derivation, since one line can yield several events
-(an `assistant` line → message + N tool calls). The server upserts on that key,
+(an `assistant` line → message + N tool calls). **Seq sign convention (frozen
+for the server):** parser-derived events have `seq ≥ 0`; watcher-synthesized
+events (`session_idle`, `session_ended`, `spool_evicted`) use a disjoint
+negative space `seq ≤ -2` (per-file persisted counter, `-1 - synth_seq`), and
+`seq = -1` is reserved as the fast-forward watermark sentinel and never appears
+on the wire. Synthetics never advance the ship watermark, so they can never
+collide with or suppress a future parser event. The server upserts on that key,
 so replays
 after crashes or retries are harmless. The spool is segmented JSONL on disk
 (`~/.local/state/agentmon/spool/`); segments are deleted only after the server
@@ -97,9 +103,10 @@ are typed JSON objects; observed types include `user`, `assistant`, `system`,
 `attachment`, `ai-title`, `mode`, `permission-mode`, `last-prompt`,
 `file-history-snapshot`, `queue-operation`.
 
-macOS fsnotify is not reliably recursive; the watcher uses per-directory watches
-on `projects/*` plus a periodic rescan (default 30s) as a catch-all for new
-project directories and missed events. Per-file state (inode, byte offset) is
+Watching is poll-based (default 2s): stat known files plus a glob rescan per
+tick — no fsnotify dependency; latency is bounded by the interval, which is
+fine for a monitor. First sighting of a file fast-forwards (no history
+emitted) unless `--backfill` is set. Per-file state (inode, byte offset) is
 persisted so restarts resume without re-shipping. Unknown line types are counted
 and skipped — new Claude Code releases must never crash the shipper.
 
@@ -166,6 +173,9 @@ from heuristic to fact.
   webhook URL) from config.
 
 ## Config
+
+Milestone 2 ships flags only (stdlib has no TOML); the config file lands with
+`serve`.
 
 TOML, one file per machine, `~/.config/agentmon/config.toml`:
 

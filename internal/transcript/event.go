@@ -15,14 +15,17 @@ const (
 	ToolResult       EventType = "tool_result"
 	PermissionMode   EventType = "permission_mode"
 	TurnCompleted    EventType = "turn_completed"
+	// Watcher-produced (milestone 2): not derived from transcript lines.
+	SessionIdle  EventType = "session_idle"
+	SessionEnded EventType = "session_ended"
+	SpoolEvicted EventType = "spool_evicted"
 )
 
 // AllEventTypes lists every event type this package can produce.
-// Watcher-produced types (session_idle, session_ended, spool_evicted)
-// belong to milestone 2, not here.
 var AllEventTypes = []EventType{
 	SessionStarted, SessionTitle, UserPrompt, AssistantMessage,
 	ToolCall, ToolResult, PermissionMode, TurnCompleted,
+	SessionIdle, SessionEnded, SpoolEvicted,
 }
 
 // Event is the envelope defined in the design spec. Identity for
@@ -85,6 +88,18 @@ type TurnCompletedPayload struct {
 	Messages   int   `json:"messages"`
 }
 
+type SessionIdlePayload struct {
+	IdleSeconds int64 `json:"idle_seconds"`
+}
+
+type SessionEndedPayload struct {
+	Reason string `json:"reason"` // "inactive" | "removed"
+}
+
+type SpoolEvictedPayload struct {
+	Dropped int `json:"dropped"`
+}
+
 func (SessionStartedPayload) EventType() EventType   { return SessionStarted }
 func (SessionTitlePayload) EventType() EventType     { return SessionTitle }
 func (UserPromptPayload) EventType() EventType       { return UserPrompt }
@@ -93,6 +108,9 @@ func (ToolCallPayload) EventType() EventType         { return ToolCall }
 func (ToolResultPayload) EventType() EventType       { return ToolResult }
 func (PermissionModePayload) EventType() EventType   { return PermissionMode }
 func (TurnCompletedPayload) EventType() EventType    { return TurnCompleted }
+func (SessionIdlePayload) EventType() EventType      { return SessionIdle }
+func (SessionEndedPayload) EventType() EventType     { return SessionEnded }
+func (SpoolEvictedPayload) EventType() EventType     { return SpoolEvicted }
 
 // AllPayloads returns a zero value of every payload type. The redact
 // package's property test walks this list, so every new payload type
@@ -102,5 +120,6 @@ func AllPayloads() []Payload {
 		SessionStartedPayload{}, SessionTitlePayload{}, UserPromptPayload{},
 		AssistantMessagePayload{}, ToolCallPayload{}, ToolResultPayload{},
 		PermissionModePayload{}, TurnCompletedPayload{},
+		SessionIdlePayload{}, SessionEndedPayload{}, SpoolEvictedPayload{},
 	}
 }
