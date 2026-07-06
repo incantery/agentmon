@@ -79,6 +79,8 @@ func (p *Parser) Line(offset int64, data []byte) []Event {
 		payloads = append(payloads, PermissionModePayload{Mode: rl.PermissionMode})
 	case "user":
 		payloads = append(payloads, p.userPayloads(rl)...)
+	case "assistant":
+		payloads = append(payloads, p.assistantPayloads(rl)...)
 	default:
 		p.Skipped[rl.Type]++
 	}
@@ -202,4 +204,44 @@ func flattenContent(raw json.RawMessage) string {
 		}
 	}
 	return buf.String()
+}
+
+func (p *Parser) assistantPayloads(rl rawLine) []Payload {
+	var msg rawMessage
+	if err := json.Unmarshal(rl.Message, &msg); err != nil {
+		p.Skipped["assistant:badmessage"]++
+		return nil
+	}
+	var blocks []rawBlock
+	// Assistant content should always be an array; tolerate anything else
+	// by emitting the message event with empty text.
+	_ = json.Unmarshal(msg.Content, &blocks)
+
+	var text bytes.Buffer
+	var calls []Payload
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if text.Len() > 0 {
+				text.WriteByte('\n')
+			}
+			text.WriteString(b.Text)
+		case "tool_use":
+			calls = append(calls, ToolCallPayload{Name: b.Name, Input: truncate(string(b.Input))})
+		case "thinking":
+			// dropped by design: never shipped at any level
+		default:
+			p.Skipped["assistant:block:"+b.Type]++
+		}
+	}
+	am := AssistantMessagePayload{
+		Model:               msg.Model,
+		InputTokens:         msg.Usage.InputTokens,
+		OutputTokens:        msg.Usage.OutputTokens,
+		CacheReadTokens:     msg.Usage.CacheReadInputTokens,
+		CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
+		StopReason:          msg.StopReason,
+		Text:                truncate(text.String()),
+	}
+	return append([]Payload{am}, calls...)
 }

@@ -169,3 +169,43 @@ func TestUserLineSkipCounters(t *testing.T) {
 		t.Errorf("Skipped = %v", p.Skipped)
 	}
 }
+
+func TestAssistantMessageWithToolUse(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"assistant","message":{"model":"claude-fable-5","role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"Looking now."},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/home/u/proj/login.go"}}],"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":25,"cache_read_input_tokens":50,"cache_creation_input_tokens":10}},"timestamp":"2026-07-06T10:00:05.000Z","cwd":"/home/u/proj","sessionId":"sess-1"}`,
+	)
+	if len(got) != 3 { // session_started + assistant_message + tool_call
+		t.Fatalf("got %d events: %+v", len(got), got)
+	}
+	am := got[1].Payload.(AssistantMessagePayload)
+	want := AssistantMessagePayload{
+		Model: "claude-fable-5", InputTokens: 100, OutputTokens: 25,
+		CacheReadTokens: 50, CacheCreationTokens: 10,
+		StopReason: "tool_use", Text: "Looking now.",
+	}
+	if am != want {
+		t.Errorf("assistant_message = %+v, want %+v", am, want)
+	}
+	tc := got[2].Payload.(ToolCallPayload)
+	if tc.Name != "Read" || tc.Input != `{"file_path":"/home/u/proj/login.go"}` {
+		t.Errorf("tool_call = %+v", tc)
+	}
+	if p.Skipped["assistant:block:thinking"] != 0 {
+		t.Errorf("thinking must be silently dropped, not counted: %v", p.Skipped)
+	}
+}
+
+func TestAssistantTextOnly(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"assistant","message":{"model":"claude-fable-5","role":"assistant","content":[{"type":"text","text":"Fixed."}],"stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":10}},"timestamp":"2026-07-06T10:00:10.000Z","sessionId":"sess-1"}`,
+	)
+	if len(got) != 2 {
+		t.Fatalf("got %+v", got)
+	}
+	am := got[1].Payload.(AssistantMessagePayload)
+	if am.StopReason != "end_turn" || am.Text != "Fixed." || am.InputTokens != 200 {
+		t.Errorf("assistant_message = %+v", am)
+	}
+}
