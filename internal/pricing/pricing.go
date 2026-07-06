@@ -5,6 +5,11 @@
 // deliberately (stable, conservative overestimate). Unknown models are
 // never guessed: Cost returns priced=false and callers must surface
 // "unpriced" rather than zero-cost.
+//
+// Changing this table changes the bytes of re-derived events: replayed
+// history from before a table change will not dedupe against already-shipped
+// lines (Loki dedupes exact bytes only). Same applies to the one-time
+// upgrade that introduced cost stamping.
 package pricing
 
 import "strings"

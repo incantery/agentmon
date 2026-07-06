@@ -307,6 +307,45 @@ func TestUnknownModelUnpriced(t *testing.T) {
 	}
 }
 
+func TestMultiLineResponseBillsUsageOnce(t *testing.T) {
+	p := NewParser("sess-1")
+	// One API response written as two adjacent lines (same message id,
+	// identical usage) — the real Claude Code on-disk shape.
+	got := collect(t, p,
+		`{"type":"assistant","message":{"id":"msg_01AB","model":"claude-fable-5","role":"assistant","content":[{"type":"text","text":"Looking."}],"stop_reason":"tool_use","usage":{"input_tokens":6199,"output_tokens":383,"cache_read_input_tokens":18341,"cache_creation_input_tokens":3899}},"timestamp":"2026-07-08T10:00:00.000Z","sessionId":"sess-1"}`,
+		`{"type":"assistant","message":{"id":"msg_01AB","model":"claude-fable-5","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/x"}}],"stop_reason":"tool_use","usage":{"input_tokens":6199,"output_tokens":383,"cache_read_input_tokens":18341,"cache_creation_input_tokens":3899}},"timestamp":"2026-07-08T10:00:00.100Z","sessionId":"sess-1"}`,
+	)
+	// session_started + am1 + am2 + tool_call
+	if len(got) != 4 {
+		t.Fatalf("got %d events: %+v", len(got), got)
+	}
+	am1 := got[1].Payload.(AssistantMessagePayload)
+	am2 := got[2].Payload.(AssistantMessagePayload)
+	if am1.OutputTokens != 383 || am1.CostUSD == nil {
+		t.Errorf("first line must carry usage+cost: %+v", am1)
+	}
+	if am2.InputTokens != 0 || am2.OutputTokens != 0 || am2.CacheReadTokens != 0 || am2.CacheCreationTokens != 0 || am2.CostUSD != nil {
+		t.Errorf("continuation line must be usage-zeroed and unpriced: %+v", am2)
+	}
+	if got[3].Type != ToolCall {
+		t.Errorf("tool_call lost: %+v", got)
+	}
+}
+
+func TestDistinctMessageIDsBothBilled(t *testing.T) {
+	p := NewParser("sess-1")
+	line := func(id string) string {
+		return `{"type":"assistant","message":{"id":"` + id + `","model":"claude-haiku-4-5","role":"assistant","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":100,"output_tokens":10}},"sessionId":"sess-1"}`
+	}
+	got := collect(t, p, line("msg_A"), line("msg_B"))
+	for i := 1; i <= 2; i++ {
+		am := got[i].Payload.(AssistantMessagePayload)
+		if am.OutputTokens != 10 || am.CostUSD == nil {
+			t.Errorf("line %d must be billed: %+v", i, am)
+		}
+	}
+}
+
 func TestTruncateInvalidUTF8EarlyByteDoesNotWipePrefix(t *testing.T) {
 	s := `{"k":"` + "\xff" + strings.Repeat("a", 3000) + `"}`
 	got := truncate(s)
