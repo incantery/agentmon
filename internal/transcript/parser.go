@@ -133,9 +133,9 @@ func truncate(s string) string {
 
 // rawMessage covers .message on user and assistant lines.
 type rawMessage struct {
-	Role       string          `json:"role"`
-	Model      string          `json:"model"`
-	StopReason string          `json:"stop_reason"`
+	Role       string `json:"role"`
+	Model      string `json:"model"`
+	StopReason string `json:"stop_reason"`
 	Usage      struct {
 		InputTokens              int64 `json:"input_tokens"`
 		OutputTokens             int64 `json:"output_tokens"`
