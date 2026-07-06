@@ -73,9 +73,14 @@ func (w *Watcher) pollFile(path string, now time.Time) {
 	_, known := w.st.Files[path] // must read BEFORE File() get-or-creates
 	fs := w.st.File(path)
 	if !tracked {
-		if !known || !fs.Watermark.Set {
+		if !known {
 			// First sighting ever: fast-forward unless backfilling, so the
 			// first run doesn't flood the sink with historical transcripts.
+			// A known file with an unset watermark (backfill mode, or a
+			// shrink-reset saved mid-re-anchor) must NOT fast-forward: its
+			// tail simply replays from zero on the next change, which at
+			// worst re-emits already-shipped identities (at-least-once,
+			// server dedupes) and never skips content.
 			fi, err := os.Stat(path)
 			if err != nil {
 				w.FileErrs++

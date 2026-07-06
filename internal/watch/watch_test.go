@@ -120,6 +120,44 @@ func TestWatermarkPersistsAcrossWatchers(t *testing.T) {
 	}
 }
 
+func TestShrinkResetPersistedThenRestartDoesNotSkipContent(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	st, _ := state.Load(statePath)
+	w, _, dir, _ := newTestWatcher(t, st, true)
+	path := filepath.Join(dir, "s1.jsonl")
+	write(t, path, line1+line2)
+	w.PollOnce() // emits, watermark anchored
+
+	// Rewrite smaller with a PARTIAL line: the tail's shrink-reset clears
+	// the watermark, no complete line re-anchors it, and PollOnce persists
+	// that unset watermark.
+	write(t, path, `{"type":"ai-ti`)
+	w.PollOnce()
+	if st.File(path).Watermark.Set {
+		t.Fatal("precondition: watermark should be unset after shrink+partial")
+	}
+
+	// Restart: fresh state from disk, fresh watcher (non-backfill, like a
+	// real daemon restart). Completing the file must NOT be fast-forwarded
+	// past.
+	st2, err := state.Load(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2 := &collector{}
+	w2 := New(Options{
+		Roots: []string{filepath.Dir(dir)}, Machine: "m1", Level: redact.Metadata,
+		IdleAfter: 60 * time.Second, EndedAfter: 30 * time.Minute,
+		Now: func() time.Time { return time.Date(2026, 7, 6, 14, 0, 0, 0, time.UTC) },
+	}, st2, c2)
+	appendTo(t, path, `tle","aiTitle":"T","sessionId":"s1"}`+"\n")
+	w2.PollOnce()
+	got := types(c2.events)
+	if len(got) != 2 || got[0] != transcript.SessionStarted || got[1] != transcript.SessionTitle {
+		t.Fatalf("rewritten content was skipped after restart: %v", got)
+	}
+}
+
 func TestRemovedFileEmitsSessionEnded(t *testing.T) {
 	st, _ := state.Load("")
 	w, c, dir, _ := newTestWatcher(t, st, true)
