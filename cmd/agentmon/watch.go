@@ -79,6 +79,7 @@ func (s *spoolSink) Emit(ev transcript.Event) error {
 			Machine:   s.machine,
 			SessionID: "spool",
 			Offset:    now.UnixNano(),
+			Seq:       -2, // synthetic identity space (negative seq)
 			TS:        now,
 			Type:      transcript.SpoolEvicted,
 			Payload:   transcript.SpoolEvictedPayload{Dropped: evicted},

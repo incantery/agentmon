@@ -70,6 +70,35 @@ func TestRoundtripAndDelete(t *testing.T) {
 	}
 }
 
+func TestSaveSkipsWhenUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s, _ := Load(path)
+	s.File("/x").Size = 1
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// Clobber the file directly; an unchanged re-Save must NOT rewrite it.
+	if err := os.WriteFile(path, []byte("sentinel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "sentinel" {
+		t.Error("Save rewrote the file despite unchanged state")
+	}
+	// A real change must write again.
+	s.File("/x").Size = 2
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	if string(data) == "sentinel" {
+		t.Error("Save skipped a genuine change")
+	}
+}
+
 func TestInMemorySaveIsNoop(t *testing.T) {
 	s, err := Load("")
 	if err != nil {

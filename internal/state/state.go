@@ -4,6 +4,7 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -39,11 +40,14 @@ type FileState struct {
 	MidTurn          bool      `json:"mid_turn"`
 	IdleFired        bool      `json:"idle_fired"`
 	Ended            bool      `json:"ended"`
+	SynthSeq         int       `json:"synth_seq,omitempty"` // count of watcher-synthesized events emitted for this file
+	Project          string    `json:"project,omitempty"`   // last known project, for synthetics emitted before any parser event this run
 }
 
 type State struct {
-	path  string
-	Files map[string]*FileState `json:"files"`
+	path      string
+	Files     map[string]*FileState `json:"files"`
+	lastSaved []byte
 }
 
 // Load reads the state file at path; a missing file yields an empty
@@ -94,6 +98,9 @@ func (s *State) Save() error {
 	if err != nil {
 		return err
 	}
+	if bytes.Equal(data, s.lastSaved) {
+		return nil
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".state-*")
 	if err != nil {
 		return err
@@ -111,5 +118,6 @@ func (s *State) Save() error {
 		os.Remove(tmp.Name())
 		return err
 	}
+	s.lastSaved = data
 	return nil
 }

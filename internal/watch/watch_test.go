@@ -261,6 +261,63 @@ func TestEndedFiresOnceThenActivityResumes(t *testing.T) {
 	}
 }
 
+func TestSyntheticAfterFastForwardDoesNotSwallowResume(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, now := newTestWatcher(t, st, false) // non-backfill: fast-forward
+	path := filepath.Join(dir, "s1.jsonl")
+	write(t, path, line1) // pre-existing content, recent mtime
+	// Anchor mtime to the test's fake clock rather than real wall-clock
+	// time: initTimers seeds activity from fi.ModTime(), and this test
+	// must be deterministic regardless of when it actually runs.
+	if err := os.Chtimes(path, *now, *now); err != nil {
+		t.Fatal(err)
+	}
+	w.PollOnce() // first sighting: fast-forward, no events
+	*now = now.Add(31 * time.Minute)
+	w.PollOnce() // session_ended{inactive}
+	if got := types(c.events); len(got) != 1 || got[0] != transcript.SessionEnded {
+		t.Fatalf("setup: want one session_ended, got %v", got)
+	}
+	if c.events[0].Seq >= 0 {
+		t.Errorf("synthetic seq must be negative, got %d", c.events[0].Seq)
+	}
+	c.events = nil
+	// The session resumes: the appended line's events must NOT be covered.
+	appendTo(t, path, `{"type":"permission-mode","permissionMode":"auto","sessionId":"s1"}`+"\n")
+	w.PollOnce()
+	if got := types(c.events); len(got) != 1 || got[0] != transcript.PermissionMode {
+		t.Fatalf("resumed session's events were swallowed: %v", got)
+	}
+}
+
+func TestStaleStateEntriesPrunedOnRestart(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	st, _ := state.Load(statePath)
+	w, _, dir, _ := newTestWatcher(t, st, true)
+	path := filepath.Join(dir, "s1.jsonl")
+	write(t, path, line1)
+	w.PollOnce() // tracked + persisted
+	os.Remove(path)
+	// simulate downtime: fresh state + fresh watcher, file already gone
+	st2, _ := state.Load(statePath)
+	if _, ok := st2.Files[path]; !ok {
+		t.Fatal("setup: entry should be persisted")
+	}
+	c2 := &collector{}
+	w2 := New(Options{
+		Roots: []string{filepath.Dir(dir)}, Machine: "m1", Level: redact.Metadata,
+		IdleAfter: 60 * time.Second, EndedAfter: 30 * time.Minute,
+		Now: func() time.Time { return time.Date(2026, 7, 6, 12, 5, 0, 0, time.UTC) },
+	}, st2, c2)
+	w2.PollOnce()
+	if _, ok := st2.Files[path]; ok {
+		t.Error("stale entry not pruned")
+	}
+	if len(c2.events) != 0 {
+		t.Errorf("silent prune must emit nothing, got %v", types(c2.events))
+	}
+}
+
 func TestHistoricalFilesGrandfatheredSilently(t *testing.T) {
 	st, _ := state.Load("")
 	w, c, dir, now := newTestWatcher(t, st, false)

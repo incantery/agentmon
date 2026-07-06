@@ -53,16 +53,19 @@ func (w *Watcher) PollOnce() error {
 		seen[path] = true
 		w.pollFile(path, now)
 	}
-	// Files we were tracking that vanished: the session is gone.
-	for path, t := range w.tails {
+	// Files that vanished: tracked ones get a session_ended synthetic;
+	// entries left over from a previous run (file deleted while we were
+	// down) are pruned silently — consistent with grandfathering.
+	for path, fs := range w.st.Files {
 		if seen[path] {
 			continue
 		}
-		fs := w.st.File(path)
-		if !fs.Ended {
-			w.synthetic(t, fs, now, transcript.SessionEndedPayload{Reason: "removed"})
+		if t, ok := w.tails[path]; ok {
+			if !fs.Ended {
+				w.synthetic(t, fs, now, transcript.SessionEndedPayload{Reason: "removed"})
+			}
+			delete(w.tails, path)
 		}
-		delete(w.tails, path)
 		w.st.Delete(path)
 	}
 	return w.st.Save()
@@ -107,6 +110,9 @@ func (w *Watcher) pollFile(path string, now time.Time) {
 	}
 	fs.Watermark = t.mark
 	fs.Size = t.lastSize
+	if t.project != "" {
+		fs.Project = t.project
+	}
 	if len(evs) > 0 {
 		last := evs[len(evs)-1].Type
 		fs.MidTurn = last != transcript.TurnCompleted && last != transcript.SessionEnded
@@ -124,17 +130,21 @@ func (w *Watcher) emit(ev transcript.Event) {
 	}
 }
 
-// synthetic emits a watcher-generated event, continuing the seq counter
-// at the file's last offset so identity never collides with parser events.
+// synthetic emits a watcher-generated event. Synthetics get an identity
+// space disjoint from parser events — negative seq (-2, -3, …; parser
+// seqs are ≥ 0 and -1 is the fast-forward sentinel) — and never advance
+// the ship watermark, so they can never cover a future parser event.
 func (w *Watcher) synthetic(t *tail, fs *state.FileState, now time.Time, pl transcript.Payload) {
-	fs.Watermark.Seq++
-	fs.Watermark.Set = true
-	t.mark = fs.Watermark
+	fs.SynthSeq++
+	project := t.project
+	if project == "" {
+		project = fs.Project
+	}
 	w.emit(transcript.Event{
-		Project:   t.project,
+		Project:   project,
 		SessionID: t.sessionID,
 		Offset:    fs.Watermark.Offset,
-		Seq:       fs.Watermark.Seq,
+		Seq:       -1 - fs.SynthSeq,
 		TS:        now,
 		Type:      pl.EventType(),
 		Payload:   pl,
