@@ -18,7 +18,8 @@ for the AI-agent age.
 
 ## Status
 
-Early — milestone 1 of 5. What works today:
+Milestones 1–3 of 5 done: transcript parsing, live `watch` + spool, and the
+LGTM sink (TOML config, Loki drain, `deploy/`). What works today:
 
 ```sh
 make build
@@ -56,8 +57,31 @@ file for resuming across restarts. Flags:
 | `--dry-run` | off | print events to stdout; no state or spool writes |
 | `--once` | off | poll once and exit |
 
+When `[loki].url` is set (via `--config`, see below), `watch` drains the spool
+to Loki every 10s; `agentmon drain --once` ships whatever's spooled manually,
+without a `watch` running.
+
+## Config
+
+Flags can also come from a per-machine TOML file (`--config`, default
+`~/.config/agentmon/config.toml`) — flag defaults are seeded from it, and an
+explicit flag still wins. Minimal example:
+
+```toml
+machine = "laptop"
+
+[watch]
+level = "metadata"
+
+[loki]
+url = "http://lab-host:3100"
+```
+
+See [`deploy/README.md`](deploy/README.md) for standing up the Loki + Grafana
+backend this points at (Tilt + k8s, dashboard and ntfy alert included).
+
 Coming next, per [the design](docs/superpowers/specs/2026-07-06-agentmon-design.md):
-the ingest server (`serve`), alerts, and service units.
+operational polish — launchd/systemd units, `agentmon emit` hook command.
 
 ## Design principles
 
