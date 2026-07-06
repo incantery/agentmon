@@ -68,6 +68,68 @@
       "targets": [
         { "refId": "A", "expr": "{job=\"agentmon\"}" }
       ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Cost (24h, USD)",
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 18 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sum_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | unwrap payload_cost_usd | __error__=\"\" [24h]))"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Cost/hour by model (USD)",
+      "gridPos": { "h": 7, "w": 18, "x": 6, "y": 18 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (payload_model) (sum_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | unwrap payload_cost_usd | __error__=\"\" [1h]))"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Tokens/hour (output vs cache-read)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 25 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "output",
+          "expr": "sum(sum_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | unwrap payload_output_tokens | __error__=\"\" [1h]))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "cache read",
+          "expr": "sum(sum_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | unwrap payload_cache_read_tokens | __error__=\"\" [1h]))"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Top sessions by cost (24h)",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 25 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 3 } },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "topk(10, sum by (session_id) (sum_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | unwrap payload_cost_usd | __error__=\"\" [24h])))"
+        }
+      ]
     }
   ]
 }
