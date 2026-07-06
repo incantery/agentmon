@@ -194,13 +194,17 @@ func (s *Spool) ClosedSegments() ([]string, error) {
 }
 
 // Ack deletes a shipped segment. It refuses the open current segment.
+// A segment already removed (e.g. by cap eviction racing the drainer) counts as acked.
 func (s *Spool) Ack(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cur != nil && path == s.cur.Name() {
 		return fmt.Errorf("spool: refusing to ack the current segment %s", path)
 	}
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (s *Spool) Close() error {

@@ -202,3 +202,18 @@ func TestConcurrentAppendAndDrainOps(t *testing.T) {
 	}
 	<-done
 }
+
+func TestAckOfAlreadyEvictedSegmentSucceeds(t *testing.T) {
+	sp, _ := Open(t.TempDir(), 1<<20, 1<<30)
+	defer sp.Close()
+	sp.Append([]byte(`{"a":1}`))
+	sp.Rotate()
+	closed, _ := sp.ClosedSegments()
+	if len(closed) != 1 {
+		t.Fatalf("setup: %v", closed)
+	}
+	os.Remove(closed[0]) // simulate eviction winning the race
+	if err := sp.Ack(closed[0]); err != nil {
+		t.Errorf("Ack of already-gone segment must succeed: %v", err)
+	}
+}
