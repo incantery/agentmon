@@ -31,9 +31,33 @@ and prints a summary of skipped line types to stderr. At `--level metadata`, no
 prompt/file/tool content appears in the output; at `--level full`, content
 fields are included (truncated to 2KB).
 
+```sh
+bin/agentmon watch --dry-run
+```
+
+`watch` polls `~/.claude/projects/**/*.jsonl` (default every 2s), derives the
+same structured events as `parse`, stamps them with a machine name, and either
+prints them (`--dry-run`, stdout sink + in-memory state — touches nothing on
+disk) or appends them to an at-least-once disk spool plus a persisted state
+file for resuming across restarts. Flags:
+
+| flag | default | meaning |
+| --- | --- | --- |
+| `--roots` | `~/.claude/projects` | comma-separated transcript roots |
+| `--machine` | `os.Hostname()` | machine name stamped on events |
+| `--level` | `metadata` | `metadata` or `full` |
+| `--interval` | `2s` | poll interval |
+| `--idle-after` | `60s` | mid-turn inactivity before `session_idle` |
+| `--ended-after` | `30m` | inactivity before `session_ended` |
+| `--state-file` | `~/.local/state/agentmon/state.json` | watch state path |
+| `--spool-dir` | `~/.local/state/agentmon/spool` | spool directory |
+| `--spool-max-mb` | `256` | spool size cap (MB) |
+| `--backfill` | off | emit pre-existing history on first sighting instead of fast-forwarding |
+| `--dry-run` | off | print events to stdout; no state or spool writes |
+| `--once` | off | poll once and exit |
+
 Coming next, per [the design](docs/superpowers/specs/2026-07-06-agentmon-design.md):
-watch + spool (background tailing with at-least-once delivery), the ingest
-server (SQLite + sessions API), alerts (ntfy), and service units.
+the ingest server (`serve`), alerts, and service units.
 
 ## Design principles
 

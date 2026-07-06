@@ -97,9 +97,10 @@ are typed JSON objects; observed types include `user`, `assistant`, `system`,
 `attachment`, `ai-title`, `mode`, `permission-mode`, `last-prompt`,
 `file-history-snapshot`, `queue-operation`.
 
-macOS fsnotify is not reliably recursive; the watcher uses per-directory watches
-on `projects/*` plus a periodic rescan (default 30s) as a catch-all for new
-project directories and missed events. Per-file state (inode, byte offset) is
+Watching is poll-based (default 2s): stat known files plus a glob rescan per
+tick — no fsnotify dependency; latency is bounded by the interval, which is
+fine for a monitor. First sighting of a file fast-forwards (no history
+emitted) unless `--backfill` is set. Per-file state (inode, byte offset) is
 persisted so restarts resume without re-shipping. Unknown line types are counted
 and skipped — new Claude Code releases must never crash the shipper.
 
@@ -166,6 +167,9 @@ from heuristic to fact.
   webhook URL) from config.
 
 ## Config
+
+Milestone 2 ships flags only (stdlib has no TOML); the config file lands with
+`serve`.
 
 TOML, one file per machine, `~/.config/agentmon/config.toml`:
 
