@@ -8,13 +8,15 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/incantery/agentmon/internal/config"
 	"github.com/incantery/agentmon/internal/redact"
 )
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   agentmon parse [--level metadata|full] <session.jsonl>
-  agentmon watch [--dry-run] [--once] [--backfill] [flags]`)
+  agentmon watch [--config PATH] [--dry-run] [--once] [--backfill] [flags]
+  agentmon drain [--config PATH] [--once]`)
 	os.Exit(2)
 }
 
@@ -35,8 +37,14 @@ func main() {
 			os.Exit(1)
 		}
 	case "watch":
-		f := defaultWatchFlags()
+		cfg, err := config.Load(configPathFromArgs(os.Args[2:]))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "agentmon:", err)
+			os.Exit(1)
+		}
+		f := watchFlagsFrom(cfg)
 		fs := flag.NewFlagSet("watch", flag.ExitOnError)
+		fs.String("config", config.DefaultPath(), "config file (already applied; here for -h)")
 		fs.StringVar(&f.roots, "roots", f.roots, "comma-separated transcript roots")
 		fs.StringVar(&f.machine, "machine", f.machine, "machine name stamped on events")
 		fs.StringVar(&f.level, "level", f.level, `content level: "metadata" or "full"`)
@@ -49,11 +57,32 @@ func main() {
 		fs.BoolVar(&f.backfill, "backfill", false, "emit pre-existing history on first sighting")
 		fs.BoolVar(&f.dryRun, "dry-run", false, "print events to stdout; no state or spool writes")
 		fs.BoolVar(&f.once, "once", false, "poll once and exit")
+		fs.StringVar(&f.lokiURL, "loki-url", f.lokiURL, "Loki base URL (enables the drain loop)")
+		fs.DurationVar(&f.drainInterval, "drain-interval", f.drainInterval, "spool→Loki drain interval")
 		fs.Parse(os.Args[2:])
 		if fs.NArg() != 0 {
 			usage()
 		}
 		if err := runWatch(os.Stdout, os.Stderr, f); err != nil {
+			fmt.Fprintln(os.Stderr, "agentmon:", err)
+			os.Exit(1)
+		}
+	case "drain":
+		cfg, err := config.Load(configPathFromArgs(os.Args[2:]))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "agentmon:", err)
+			os.Exit(1)
+		}
+		fs := flag.NewFlagSet("drain", flag.ExitOnError)
+		fs.String("config", config.DefaultPath(), "config file (already applied; here for -h)")
+		once := fs.Bool("once", false, "drain once and exit")
+		lokiURL := fs.String("loki-url", cfg.Loki.URL, "Loki base URL")
+		fs.Parse(os.Args[2:])
+		if fs.NArg() != 0 {
+			usage()
+		}
+		cfg.Loki.URL = *lokiURL
+		if err := runDrain(os.Stdout, os.Stderr, cfg, *once); err != nil {
 			fmt.Fprintln(os.Stderr, "agentmon:", err)
 			os.Exit(1)
 		}
