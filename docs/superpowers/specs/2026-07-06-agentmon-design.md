@@ -79,7 +79,13 @@ At-least-once, server-side idempotent. Events carry identity
 `(machine, session_id, offset, seq)` — `offset` is the byte offset of the source
 line (timer-derived events reuse the last-seen offset) and `seq` is the index of
 the event within that line's derivation, since one line can yield several events
-(an `assistant` line → message + N tool calls). The server upserts on that key,
+(an `assistant` line → message + N tool calls). **Seq sign convention (frozen
+for the server):** parser-derived events have `seq ≥ 0`; watcher-synthesized
+events (`session_idle`, `session_ended`, `spool_evicted`) use a disjoint
+negative space `seq ≤ -2` (per-file persisted counter, `-1 - synth_seq`), and
+`seq = -1` is reserved as the fast-forward watermark sentinel and never appears
+on the wire. Synthetics never advance the ship watermark, so they can never
+collide with or suppress a future parser event. The server upserts on that key,
 so replays
 after crashes or retries are harmless. The spool is segmented JSONL on disk
 (`~/.local/state/agentmon/spool/`); segments are deleted only after the server
