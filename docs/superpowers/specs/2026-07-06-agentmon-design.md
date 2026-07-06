@@ -157,27 +157,40 @@ starts life as the `session_idle` heuristic. The designed-for fix (not v1) is
 that writes precise events straight into the spool, upgrading needs-attention
 from heuristic to fact.
 
-## Server
+## Backend: Grafana LGTM on the home lab (decided 2026-07-06, supersedes the custom server)
 
-- **Storage:** SQLite (`modernc.org/sqlite`, CGO-free), two tables: `events`
-  (envelope + JSON payload, unique on `(machine, session_id, offset, seq)`) and
-  `sessions` (materialized latest-state per session: title, project, machine,
-  state, last activity, token totals — updated on ingest).
-- **API:** `POST /v1/events` (batch ingest), `GET /v1/sessions`,
-  `GET /v1/sessions/{id}/events`. Bearer-token auth from config; the server is
-  meant to sit on a private network (Tailscale/LAN) — the token is a seatbelt,
-  not the security story. TLS optional/off by default accordingly.
-- **Alerts:** rule evaluation on ingest; v1 rules are `turn_completed` and
-  `session_idle`, filterable per machine/project, with per-session debounce
-  (default 5min) so a chatty session doesn't spam. Sink: ntfy (or any
-  webhook URL) from config.
+The original design called for a custom ingest server (SQLite + query API +
+alert engine). Milestone 3 replaces it with **Grafana Loki + Grafana on the
+home-lab Kubernetes cluster, stood up via Tilt** — the entire custom backend
+drops off the critical path; agentmon stays a shipper.
+
+- **Sink:** the spool drains to Loki's HTTP push API (JSON). Stream labels are
+  low-cardinality only: `job="agentmon"`, `machine`, `type`; session, project,
+  and payload stay inside the JSON line (LogQL `| json` filters). Push-based
+  end to end — laptops sleep and roam; nothing ever scrapes them.
+- **Delivery over Loki:** the spool's ack semantics map directly — a segment is
+  deleted only after a 2xx push. Loki has no upsert, but it drops exact
+  duplicates (same stream + timestamp + line), and our deterministic identity
+  scheme yields byte-identical lines on replay, so retried batches dedupe
+  naturally. Rare edge duplicates are acceptable for observability. Loki must
+  be configured to accept old timestamps (`reject_old_samples: false`) or
+  `--backfill` ingestion of historical transcripts will be rejected.
+- **Pane of glass:** a provisioned Grafana dashboard (sessions activity,
+  event/turn rates, token spend, needs-attention panel) over the Loki
+  datasource — provisioned as code in `deploy/`, not clicked together.
+- **Alerts:** Grafana alerting with LogQL conditions over the discrete state
+  events the schema already emits (`session_idle`, `session_ended`,
+  `turn_completed`), routed to an ntfy webhook contact point. No metrics stack
+  required for v1; Mimir/metrics can join later for trends.
+- **Custom `serve`/SQLite:** demoted to "if ever." The spool format plus the
+  frozen identity scheme mean a richer server could ingest the same data later
+  without touching the shipper.
 
 ## Config
 
-Milestone 2 ships flags only (stdlib has no TOML); the config file lands with
-`serve`.
-
-TOML, one file per machine, `~/.config/agentmon/config.toml`:
+TOML (`github.com/BurntSushi/toml` — the project's first dependency; adopted
+with milestone 3), one file per machine, `~/.config/agentmon/config.toml`.
+Flags override config; config overrides defaults.
 
 ```toml
 machine = "seth-mbp-work"
@@ -189,32 +202,25 @@ idle_after = "60s"
 ended_after = "30m"
 spool_max_mb = 256
 
-[server]                     # used by watch (target) and CLI (query)
-url = "http://homelab:7621"
-token = "…"
-
-[serve]                      # used by agentmon serve
-listen = ":7621"
-db = "/var/lib/agentmon/agentmon.db"
-[serve.alerts]
-ntfy_url = "https://ntfy.sh/…"
-rules = ["turn_completed", "session_idle"]
-debounce = "5m"
+[loki]                       # presence of url enables the drain loop
+url = "http://homelab:3100"  # Loki push endpoint base
+tenant = ""                  # optional X-Scope-OrgID
+labels = { env = "lab" }     # extra static stream labels (kept low-cardinality)
 ```
 
 ## Package layout
 
 ```
-cmd/agentmon/        main; subcommands watch, serve, sessions, tail, emit (reserved)
+cmd/agentmon/        main; subcommands parse, watch, drain, emit (reserved)
 internal/transcript/ JSONL line parsing + event derivation (pure; fixture-tested)
 internal/redact/     level enforcement over derived events
 internal/watch/      fs watching, offsets, idle/ended timers
 internal/spool/      segmented disk spool, ack/evict
-internal/ship/       batching HTTP client, retry/backoff
-internal/serve/      HTTP server, ingest, query API
-internal/store/      SQLite schema + queries, session materialization
-internal/alert/      rules, debounce, ntfy/webhook sink
-internal/config/     TOML loading + defaults
+internal/loki/       Loki push client: batching, retry/backoff, tenant header
+internal/drain/      spool → Loki drainer (segment lifecycle, ack-on-2xx)
+internal/config/     TOML loading + defaults + flag merging
+deploy/              Tiltfile + k8s manifests: Loki, Grafana (provisioned
+                     datasource, dashboard, alert rules, ntfy contact point)
 ```
 
 `internal/transcript` is the heart and is deliberately pure (lines in, events
@@ -228,8 +234,8 @@ locally, and where a non-Claude `Source` would slot in.
 - **Redaction property:** at `metadata` level, no payload field may contain
   prompt/file text — enforced by a test that walks every event type's payload.
 - **Pipeline integration:** temp dir, synthetic JSONL appends → `watch` →
-  in-process `serve` → assert `sessions`/`events` API state; covers offsets,
-  restart-resume, dedupe on replay.
+  spool → drainer → local HTTP stub standing in for Loki; covers offsets,
+  restart-resume, segment ack/delete, batch shape.
 - **Heuristics:** simulated clocks for idle/ended timers.
 - **No network in tests**; ntfy sink tested against a local HTTP stub.
 
@@ -239,15 +245,18 @@ locally, and where a non-Claude `Source` would slot in.
    `agentmon parse <file>` debug command proves it end to end.
 2. **watch + spool** — live tailing with offsets and restart-resume; spool on
    disk; `agentmon watch --dry-run` prints derived events.
-3. **serve + store** — ingest API, SQLite, session materialization; watch drains
-   to it; `agentmon sessions` works. *(Single pane of glass exists here.)*
-4. **alerts** — rules, debounce, ntfy sink. *(Step-away goal met here.)*
-5. **operational polish** — launchd/systemd units, spool caps + eviction
-   marker, `agentmon tail`, README.
+3. **LGTM sink** — TOML config, Loki push client, spool drainer wired into
+   `watch` (+ `agentmon drain --once`), and `deploy/` (Tilt + k8s: Loki,
+   Grafana provisioned with datasource/dashboard/alerts/ntfy contact point).
+   *(Single pane of glass AND step-away alerts exist here.)*
+4. **operational polish** — launchd/systemd units, `agentmon emit` hook
+   command, README.
 
 ## Future (designed-for, not built)
 
 - `agentmon emit` hook command → precise needs-attention events.
-- Web UI on the server (candidate sigil dogfood target).
+- Custom server / richer session UX over the same spool + identity scheme
+  (web UI would be a sigil dogfood target).
+- Mimir/metrics for long-horizon trends (token spend, turn latency).
 - Second `Source` (Codex CLI or cantrip transcripts) behind the transcript seam.
 - The fabric/overseer tool consuming `internal/transcript` locally.
