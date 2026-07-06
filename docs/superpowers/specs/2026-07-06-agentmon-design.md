@@ -124,14 +124,14 @@ Event types (v1):
 
 | type | derived from | metadata-level payload | full-level adds |
 |---|---|---|---|
-| `session_started` | first line of a new file | permission mode | — |
+| `session_started` | first line of a new file | cwd (often empty — first lines may carry none; envelope `project` backfills) | — |
 | `session_title` | `ai-title` line | title | — |
 | `user_prompt` | `user` line | char count | prompt text |
 | `assistant_message` | `assistant` line | model, token usage, stop reason | content |
 | `tool_call` | `assistant` tool_use | tool name | input (truncated) |
 | `tool_result` | `user` tool_result | ok/error | content (truncated) |
 | `permission_mode` | `permission-mode` line | mode | — |
-| `turn_completed` | assistant end-of-turn | duration, token totals | — |
+| `turn_completed` | `system` line, subtype `turn_duration` | duration_ms, message count (the source line carries no token data; per-turn token totals live on `assistant_message` events) | — |
 | `session_idle` | watcher timer: no writes mid-turn > threshold (default 60s) | idle seconds | — |
 | `session_ended` | watcher timer: no writes > threshold (default 30min) or file removed | reason | — |
 | `spool_evicted` | spool cap hit | dropped count | — |
