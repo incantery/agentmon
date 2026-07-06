@@ -228,3 +228,21 @@ func TestAssistantLineSkipCounters(t *testing.T) {
 		t.Errorf("Skipped = %v", p.Skipped)
 	}
 }
+
+func TestSystemTurnDuration(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"system","subtype":"turn_duration","durationMs":296959,"messageCount":87,"timestamp":"2026-07-06T10:26:06.551Z","sessionId":"sess-1"}`,
+		`{"type":"system","subtype":"something_new","sessionId":"sess-1"}`,
+	)
+	if len(got) != 2 { // session_started + turn_completed
+		t.Fatalf("got %+v", got)
+	}
+	tc := got[1].Payload.(TurnCompletedPayload)
+	if tc.DurationMs != 296959 || tc.Messages != 87 {
+		t.Errorf("turn_completed = %+v", tc)
+	}
+	if p.Skipped["system:something_new"] != 1 {
+		t.Errorf("Skipped = %v", p.Skipped)
+	}
+}

@@ -81,6 +81,12 @@ func (p *Parser) Line(offset int64, data []byte) []Event {
 		payloads = append(payloads, p.userPayloads(rl)...)
 	case "assistant":
 		payloads = append(payloads, p.assistantPayloads(rl)...)
+	case "system":
+		if rl.Subtype == "turn_duration" {
+			payloads = append(payloads, TurnCompletedPayload{DurationMs: rl.DurationMs, Messages: rl.MessageCount})
+		} else {
+			p.Skipped["system:"+rl.Subtype]++
+		}
 	default:
 		p.Skipped[rl.Type]++
 	}
