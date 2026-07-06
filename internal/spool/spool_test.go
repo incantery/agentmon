@@ -112,3 +112,93 @@ func TestEvictErrorDoesNotFailAppend(t *testing.T) {
 		t.Error("eviction failure not counted in EvictErrs")
 	}
 }
+
+func TestOpenIsLazyNoEmptySegments(t *testing.T) {
+	dir := t.TempDir()
+	sp, err := Open(dir, 1<<20, 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp.Close()
+	segs, _ := sp.Segments()
+	if len(segs) != 0 {
+		t.Fatalf("Open must not create segments: %v", segs)
+	}
+}
+
+func TestRotateClosesCurrentForDraining(t *testing.T) {
+	sp, _ := Open(t.TempDir(), 1<<20, 1<<30)
+	defer sp.Close()
+	sp.Append([]byte(`{"a":1}`))
+	closed, _ := sp.ClosedSegments()
+	if len(closed) != 0 {
+		t.Fatalf("current segment must not be closed yet: %v", closed)
+	}
+	if err := sp.Rotate(); err != nil {
+		t.Fatal(err)
+	}
+	closed, _ = sp.ClosedSegments()
+	if len(closed) != 1 {
+		t.Fatalf("after Rotate the segment must be closed: %v", closed)
+	}
+	// Rotate with nothing open is a no-op
+	if err := sp.Rotate(); err != nil {
+		t.Fatal(err)
+	}
+	closed2, _ := sp.ClosedSegments()
+	if len(closed2) != 1 {
+		t.Fatalf("empty Rotate created a segment: %v", closed2)
+	}
+	// next Append opens a fresh segment
+	sp.Append([]byte(`{"b":2}`))
+	segs, _ := sp.Segments()
+	if len(segs) != 2 {
+		t.Fatalf("append after Rotate should open segment 2: %v", segs)
+	}
+}
+
+func TestAckDeletesClosedRefusesCurrent(t *testing.T) {
+	sp, _ := Open(t.TempDir(), 1<<20, 1<<30)
+	defer sp.Close()
+	sp.Append([]byte(`{"a":1}`))
+	sp.Rotate()
+	sp.Append([]byte(`{"b":2}`)) // new current
+	closed, _ := sp.ClosedSegments()
+	if len(closed) != 1 {
+		t.Fatalf("setup: %v", closed)
+	}
+	if err := sp.Ack(closed[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(closed[0]); !os.IsNotExist(err) {
+		t.Error("Ack did not delete the segment")
+	}
+	segs, _ := sp.Segments()
+	if len(segs) != 1 {
+		t.Fatalf("segments after ack: %v", segs)
+	}
+	if err := sp.Ack(segs[0]); err == nil {
+		t.Error("Ack must refuse the current segment")
+	}
+}
+
+func TestConcurrentAppendAndDrainOps(t *testing.T) {
+	sp, _ := Open(t.TempDir(), 64, 1<<30)
+	defer sp.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			sp.Append([]byte(`{"n":1}`))
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		if closed, err := sp.ClosedSegments(); err == nil {
+			for _, c := range closed {
+				sp.Ack(c)
+			}
+		}
+		sp.Rotate()
+	}
+	<-done
+}
