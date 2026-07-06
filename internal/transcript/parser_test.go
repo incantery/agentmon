@@ -154,3 +154,18 @@ func TestLongPromptTruncatedButCharsExact(t *testing.T) {
 		t.Errorf("len(Text) = %d, want %d", len(pl.Text), MaxContentBytes+len("…"))
 	}
 }
+
+func TestUserLineSkipCounters(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"user","message":"not an object","sessionId":"sess-1"}`,
+		`{"type":"user","message":{"role":"user","content":null},"sessionId":"sess-1"}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"image","source":"x"}]},"sessionId":"sess-1"}`,
+	)
+	if len(got) != 1 || got[0].Type != SessionStarted {
+		t.Fatalf("expected only session_started, got %+v", got)
+	}
+	if p.Skipped["user:badmessage"] != 1 || p.Skipped["user:badcontent"] != 1 || p.Skipped["user:block:image"] != 1 {
+		t.Errorf("Skipped = %v", p.Skipped)
+	}
+}

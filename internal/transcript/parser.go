@@ -142,6 +142,10 @@ func (p *Parser) userPayloads(rl rawLine) []Payload {
 		p.Skipped["user:badmessage"]++
 		return nil
 	}
+	if len(msg.Content) == 0 || string(msg.Content) == "null" {
+		p.Skipped["user:badcontent"]++
+		return nil
+	}
 	// A plain string content is a human prompt.
 	var s string
 	if err := json.Unmarshal(msg.Content, &s); err == nil {
