@@ -141,10 +141,15 @@ func (w *Watcher) synthetic(t *tail, fs *state.FileState, now time.Time, pl tran
 	})
 }
 
-// initTimers and tickTimers are completed in the timers task; the core
-// task only records activity so state is coherent.
+// initTimers seeds timer state at first sighting. Activity starts at the
+// file's mtime, and a file already past EndedAfter is marked Ended
+// SILENTLY — historical transcripts must not fire a wave of
+// session_ended events when the watcher first runs on a machine.
 func (w *Watcher) initTimers(fs *state.FileState, fi os.FileInfo, now time.Time) {
 	fs.LastActivityUnix = fi.ModTime().Unix()
+	if now.Sub(fi.ModTime()) >= w.opts.EndedAfter {
+		fs.Ended = true
+	}
 }
 
 func (w *Watcher) tickTimers(t *tail, fs *state.FileState, grew bool, now time.Time) {
@@ -152,6 +157,21 @@ func (w *Watcher) tickTimers(t *tail, fs *state.FileState, grew bool, now time.T
 		fs.LastActivityUnix = now.Unix()
 		fs.IdleFired = false
 		fs.Ended = false
+		return
+	}
+	if fs.LastActivityUnix == 0 {
+		fs.LastActivityUnix = now.Unix()
+		return
+	}
+	idle := now.Sub(time.Unix(fs.LastActivityUnix, 0))
+	if !fs.Ended && idle >= w.opts.EndedAfter {
+		fs.Ended = true
+		w.synthetic(t, fs, now, transcript.SessionEndedPayload{Reason: "inactive"})
+		return
+	}
+	if fs.MidTurn && !fs.IdleFired && !fs.Ended && idle >= w.opts.IdleAfter {
+		fs.IdleFired = true
+		w.synthetic(t, fs, now, transcript.SessionIdlePayload{IdleSeconds: int64(idle.Seconds())})
 	}
 }
 

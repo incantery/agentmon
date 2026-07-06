@@ -91,7 +91,7 @@ func TestWatermarkPersistsAcrossWatchers(t *testing.T) {
 	st, _ := state.Load(statePath)
 	w, c, dir, _ := newTestWatcher(t, st, true)
 	path := filepath.Join(dir, "s1.jsonl")
-	write(t, path, line1)
+	write(t, path, line1+turnDoneLine)
 	w.PollOnce()
 	n := len(c.events)
 	if n == 0 {
@@ -107,7 +107,7 @@ func TestWatermarkPersistsAcrossWatchers(t *testing.T) {
 	w2 := New(Options{
 		Roots: []string{filepath.Dir(dir)}, Machine: "m1", Level: redact.Metadata,
 		IdleAfter: 60 * time.Second, EndedAfter: 30 * time.Minute,
-		Now: func() time.Time { return time.Date(2026, 7, 6, 13, 0, 0, 0, time.UTC) },
+		Now: func() time.Time { return time.Date(2026, 7, 6, 12, 15, 0, 0, time.UTC) },
 	}, st2, c2)
 	w2.PollOnce()
 	if len(c2.events) != 0 {
@@ -148,7 +148,7 @@ func TestShrinkResetPersistedThenRestartDoesNotSkipContent(t *testing.T) {
 	w2 := New(Options{
 		Roots: []string{filepath.Dir(dir)}, Machine: "m1", Level: redact.Metadata,
 		IdleAfter: 60 * time.Second, EndedAfter: 30 * time.Minute,
-		Now: func() time.Time { return time.Date(2026, 7, 6, 14, 0, 0, 0, time.UTC) },
+		Now: func() time.Time { return time.Date(2026, 7, 6, 12, 10, 0, 0, time.UTC) },
 	}, st2, c2)
 	appendTo(t, path, `tle","aiTitle":"T","sessionId":"s1"}`+"\n")
 	w2.PollOnce()
@@ -180,5 +180,103 @@ func TestRemovedFileEmitsSessionEnded(t *testing.T) {
 	w.PollOnce()
 	if len(c.events) != 0 {
 		t.Error("removed file reported twice")
+	}
+}
+
+// midTurnLine leaves the session mid-turn (assistant message, no turn_completed)
+const midTurnLine = `{"type":"assistant","message":{"model":"m","role":"assistant","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":1,"output_tokens":1}},"timestamp":"2026-07-06T12:00:01.000Z","cwd":"/p","sessionId":"s1"}` + "\n"
+const turnDoneLine = `{"type":"system","subtype":"turn_duration","durationMs":5,"messageCount":2,"timestamp":"2026-07-06T12:00:02.000Z","sessionId":"s1"}` + "\n"
+
+func TestIdleFiresOnceMidTurnAndRearms(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, now := newTestWatcher(t, st, true)
+	path := filepath.Join(dir, "s1.jsonl")
+	write(t, path, line1+midTurnLine)
+	w.PollOnce() // emits + records activity, MidTurn=true
+	c.events = nil
+
+	*now = now.Add(61 * time.Second)
+	w.PollOnce()
+	if got := types(c.events); len(got) != 1 || got[0] != transcript.SessionIdle {
+		t.Fatalf("want one session_idle, got %v", got)
+	}
+	if p := c.events[0].Payload.(transcript.SessionIdlePayload); p.IdleSeconds < 60 {
+		t.Errorf("idle_seconds = %d", p.IdleSeconds)
+	}
+	c.events = nil
+	*now = now.Add(10 * time.Second)
+	w.PollOnce()
+	if len(c.events) != 0 {
+		t.Fatalf("idle fired twice: %v", types(c.events))
+	}
+	// activity re-arms
+	appendTo(t, path, midTurnLine)
+	w.PollOnce()
+	c.events = nil
+	*now = now.Add(61 * time.Second)
+	w.PollOnce()
+	if got := types(c.events); len(got) != 1 || got[0] != transcript.SessionIdle {
+		t.Fatalf("idle did not re-arm: %v", got)
+	}
+}
+
+func TestNoIdleAfterTurnCompleted(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, now := newTestWatcher(t, st, true)
+	write(t, filepath.Join(dir, "s1.jsonl"), line1+midTurnLine+turnDoneLine)
+	w.PollOnce()
+	c.events = nil
+	*now = now.Add(2 * time.Minute)
+	w.PollOnce()
+	if len(c.events) != 0 {
+		t.Fatalf("idle fired after turn_completed: %v", types(c.events))
+	}
+}
+
+func TestEndedFiresOnceThenActivityResumes(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, now := newTestWatcher(t, st, true)
+	path := filepath.Join(dir, "s1.jsonl")
+	write(t, path, line1+turnDoneLine)
+	w.PollOnce()
+	c.events = nil
+	*now = now.Add(31 * time.Minute)
+	w.PollOnce()
+	if got := types(c.events); len(got) != 1 || got[0] != transcript.SessionEnded {
+		t.Fatalf("want one session_ended, got %v", got)
+	}
+	if p := c.events[0].Payload.(transcript.SessionEndedPayload); p.Reason != "inactive" {
+		t.Errorf("reason = %q", p.Reason)
+	}
+	c.events = nil
+	*now = now.Add(1 * time.Minute)
+	w.PollOnce()
+	if len(c.events) != 0 {
+		t.Fatalf("ended fired twice: %v", types(c.events))
+	}
+	appendTo(t, path, midTurnLine)
+	w.PollOnce()
+	if got := types(c.events); len(got) != 1 || got[0] != transcript.AssistantMessage {
+		t.Fatalf("resume after ended: %v", got)
+	}
+}
+
+func TestHistoricalFilesGrandfatheredSilently(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, now := newTestWatcher(t, st, false)
+	path := filepath.Join(dir, "ancient.jsonl")
+	write(t, path, line1)
+	oldTime := now.Add(-48 * time.Hour)
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	w.PollOnce()
+	*now = now.Add(31 * time.Minute)
+	w.PollOnce()
+	if len(c.events) != 0 {
+		t.Fatalf("grandfathered file emitted %v", types(c.events))
+	}
+	if !st.File(path).Ended {
+		t.Error("ancient file not marked Ended")
 	}
 }
