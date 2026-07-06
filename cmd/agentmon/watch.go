@@ -159,16 +159,21 @@ func runWatch(stdout, stderr io.Writer, f watchFlags) error {
 		}
 		if dr != nil {
 			sp.Rotate()
-			if _, drErr := dr.DrainOnce(); drErr != nil {
+			shipped, drErr := dr.DrainOnce()
+			if drErr != nil {
 				fmt.Fprintln(stderr, "agentmon: drain:", drErr)
 			}
+			fmt.Fprintf(stderr, "drain: shipped %d segment(s), quarantined %d\n", shipped, dr.Quarantined)
 		}
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var drainDone chan struct{}
 	if dr != nil {
+		drainDone = make(chan struct{})
 		go func() {
+			defer close(drainDone)
 			tick := time.NewTicker(f.drainInterval)
 			defer tick.Stop()
 			for {
@@ -186,6 +191,9 @@ func runWatch(stdout, stderr io.Writer, f watchFlags) error {
 	}
 	if err := w.Run(ctx, f.interval); err != nil && err != context.Canceled {
 		return err
+	}
+	if drainDone != nil {
+		<-drainDone
 	}
 	return nil
 }
