@@ -65,8 +65,15 @@ type AssistantMessagePayload struct {
 	OutputTokens        int64  `json:"output_tokens"`
 	CacheReadTokens     int64  `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int64  `json:"cache_creation_tokens,omitempty"`
-	StopReason          string `json:"stop_reason,omitempty"`
-	Text                string `json:"text,omitempty"` // cleared at metadata level
+	Cache5mTokens       int64  `json:"cache_5m_tokens,omitempty"`
+	Cache1hTokens       int64  `json:"cache_1h_tokens,omitempty"`
+	// CostUSD is the notional API cost at published rates, stamped at
+	// derivation. nil = the model isn't in the pricing table (unpriced,
+	// NOT free) — the field is omitted from JSON so dashboards can tell
+	// the difference.
+	CostUSD    *float64 `json:"cost_usd,omitempty"`
+	StopReason string   `json:"stop_reason,omitempty"`
+	Text       string   `json:"text,omitempty"` // cleared at metadata level
 }
 
 type ToolCallPayload struct {

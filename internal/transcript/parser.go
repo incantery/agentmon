@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"time"
 	"unicode/utf8"
+
+	"github.com/incantery/agentmon/internal/pricing"
 )
 
 // MaxContentBytes caps every content field (prompt text, tool input,
@@ -141,6 +143,10 @@ type rawMessage struct {
 		OutputTokens             int64 `json:"output_tokens"`
 		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		CacheCreation            struct {
+			Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+			Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+		} `json:"cache_creation"`
 	} `json:"usage"`
 	Content json.RawMessage `json:"content"` // string or []rawBlock
 }
@@ -260,6 +266,23 @@ func (p *Parser) assistantPayloads(rl rawLine) []Payload {
 		CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
 		StopReason:          msg.StopReason,
 		Text:                truncate(text.String()),
+	}
+	am.Cache5mTokens = msg.Usage.CacheCreation.Ephemeral5m
+	am.Cache1hTokens = msg.Usage.CacheCreation.Ephemeral1h
+	u := pricing.Usage{
+		InputTokens:        am.InputTokens,
+		OutputTokens:       am.OutputTokens,
+		CacheReadTokens:    am.CacheReadTokens,
+		Cache5mWriteTokens: am.Cache5mTokens,
+		Cache1hWriteTokens: am.Cache1hTokens,
+	}
+	if u.Cache5mWriteTokens+u.Cache1hWriteTokens == 0 {
+		// Older lines carry only the total: bill it all at the cheaper
+		// 5m rate (conservative-low, documented in the plan).
+		u.Cache5mWriteTokens = am.CacheCreationTokens
+	}
+	if usd, priced := pricing.Cost(am.Model, u); priced {
+		am.CostUSD = &usd
 	}
 	return append([]Payload{am}, calls...)
 }
