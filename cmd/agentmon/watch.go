@@ -7,11 +7,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/incantery/agentmon/internal/config"
+	"github.com/incantery/agentmon/internal/drain"
+	"github.com/incantery/agentmon/internal/loki"
 	"github.com/incantery/agentmon/internal/redact"
 	"github.com/incantery/agentmon/internal/spool"
 	"github.com/incantery/agentmon/internal/state"
@@ -20,34 +22,58 @@ import (
 )
 
 type watchFlags struct {
-	roots      string
-	machine    string
-	level      string
-	interval   time.Duration
-	idleAfter  time.Duration
-	endedAfter time.Duration
-	stateFile  string
-	spoolDir   string
-	spoolMaxMB int64
-	backfill   bool
-	dryRun     bool
-	once       bool
+	roots         string
+	machine       string
+	level         string
+	interval      time.Duration
+	idleAfter     time.Duration
+	endedAfter    time.Duration
+	stateFile     string
+	spoolDir      string
+	spoolMaxMB    int64
+	backfill      bool
+	dryRun        bool
+	once          bool
+	lokiURL       string
+	lokiTenant    string
+	lokiLabels    map[string]string
+	drainInterval time.Duration
 }
 
-func defaultWatchFlags() watchFlags {
-	home, _ := os.UserHomeDir()
-	host, _ := os.Hostname()
+func watchFlagsFrom(cfg config.Config) watchFlags {
 	return watchFlags{
-		roots:      filepath.Join(home, ".claude", "projects"),
-		machine:    host,
-		level:      string(redact.Metadata),
-		interval:   2 * time.Second,
-		idleAfter:  60 * time.Second,
-		endedAfter: 30 * time.Minute,
-		stateFile:  filepath.Join(home, ".local", "state", "agentmon", "state.json"),
-		spoolDir:   filepath.Join(home, ".local", "state", "agentmon", "spool"),
-		spoolMaxMB: 256,
+		roots:         strings.Join(cfg.Watch.Roots, ","),
+		machine:       cfg.Machine,
+		level:         cfg.Watch.Level,
+		interval:      cfg.Watch.Interval.D(),
+		idleAfter:     cfg.Watch.IdleAfter.D(),
+		endedAfter:    cfg.Watch.EndedAfter.D(),
+		stateFile:     cfg.Watch.StateFile,
+		spoolDir:      cfg.Watch.SpoolDir,
+		spoolMaxMB:    cfg.Watch.SpoolMaxMB,
+		lokiURL:       cfg.Loki.URL,
+		lokiTenant:    cfg.Loki.Tenant,
+		lokiLabels:    cfg.Loki.Labels,
+		drainInterval: cfg.Loki.DrainInterval.D(),
 	}
+}
+
+// configPathFromArgs pre-scans for --config before the FlagSet exists,
+// because the config supplies the other flags' defaults.
+func configPathFromArgs(args []string) string {
+	for i, a := range args {
+		if a == "--config" || a == "-config" {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				return args[i+1]
+			}
+		}
+		for _, p := range []string{"--config=", "-config="} {
+			if strings.HasPrefix(a, p) {
+				return strings.TrimPrefix(a, p)
+			}
+		}
+	}
+	return config.DefaultPath()
 }
 
 // jsonSink prints events as JSON lines (dry-run mode).
@@ -65,6 +91,11 @@ type spoolSink struct {
 }
 
 func (s *spoolSink) Emit(ev transcript.Event) error {
+	if ev.TS.IsZero() {
+		// Stamp once at write time: the spooled line must carry a stable
+		// timestamp so retried pushes stay byte-identical (Loki dedupe).
+		ev.TS = time.Now().UTC()
+	}
 	b, err := json.Marshal(ev)
 	if err != nil {
 		return err
@@ -96,12 +127,18 @@ func runWatch(stdout, stderr io.Writer, f watchFlags) error {
 		return fmt.Errorf("invalid --level %q", f.level)
 	}
 	var sink watch.Sink
+	var sp *spool.Spool
 	statePath := f.stateFile
 	if f.dryRun {
 		sink = jsonSink{enc: json.NewEncoder(stdout)}
 		statePath = "" // in-memory: dry-run touches nothing on disk
 	} else {
-		sp, err := spool.Open(f.spoolDir, 4<<20, f.spoolMaxMB<<20)
+		release, err := spool.AcquireLock(f.spoolDir)
+		if err != nil {
+			return err
+		}
+		defer release()
+		sp, err = spool.Open(f.spoolDir, 4<<20, f.spoolMaxMB<<20)
 		if err != nil {
 			return err
 		}
@@ -120,17 +157,58 @@ func runWatch(stdout, stderr io.Writer, f watchFlags) error {
 		EndedAfter: f.endedAfter,
 		Backfill:   f.backfill,
 	}, st, sink)
+	var dr *drain.Drainer
+	if !f.dryRun && f.lokiURL != "" {
+		dr = drain.New(sp, loki.New(f.lokiURL, f.lokiTenant), drain.Options{StaticLabels: f.lokiLabels})
+	}
 	if f.once {
 		err := w.PollOnce()
 		if w.FileErrs > 0 || w.SinkErrs > 0 {
 			fmt.Fprintf(stderr, "errors: file=%d sink=%d\n", w.FileErrs, w.SinkErrs)
 		}
+		if dr != nil {
+			if err := sp.Rotate(); err != nil {
+				fmt.Fprintln(stderr, "agentmon: rotate:", err)
+			}
+			shipped, drErr := dr.DrainOnce()
+			if drErr != nil {
+				fmt.Fprintln(stderr, "agentmon: drain:", drErr)
+			}
+			fmt.Fprintf(stderr, "drain: shipped %d segment(s), quarantined %d\n", shipped, dr.Quarantined)
+		}
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := w.Run(ctx, f.interval); err != nil && err != context.Canceled {
-		return err
+	var drainDone chan struct{}
+	if dr != nil {
+		drainDone = make(chan struct{})
+		go func() {
+			defer close(drainDone)
+			tick := time.NewTicker(f.drainInterval)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					if err := sp.Rotate(); err != nil {
+						fmt.Fprintln(stderr, "agentmon: rotate:", err)
+					}
+					if _, err := dr.DrainOnce(); err != nil {
+						fmt.Fprintln(stderr, "agentmon: drain:", err)
+					}
+				}
+			}
+		}()
+	}
+	runErr := w.Run(ctx, f.interval)
+	stop() // cancel ctx so the drain goroutine exits even on hard errors
+	if drainDone != nil {
+		<-drainDone
+	}
+	if runErr != nil && runErr != context.Canceled {
+		return runErr
 	}
 	return nil
 }

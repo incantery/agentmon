@@ -1,0 +1,45 @@
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: ntfy
+    receivers:
+      - uid: ntfy-webhook
+        type: webhook
+        settings:
+          url: https://ntfy.sh/agentmon-CHANGEME
+          httpMethod: POST
+policies:
+  - orgId: 1
+    receiver: ntfy
+    group_by: ["alertname"]
+groups:
+  - orgId: 1
+    name: agentmon
+    folder: agentmon
+    interval: 1m
+    rules:
+      - uid: agentmon-session-idle
+        title: Session waiting for input
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations:
+          summary: "An agentmon session has been idle mid-turn"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: loki
+            model:
+              expr: 'sum(count_over_time({job="agentmon", type="session_idle"}[5m]))'
+              queryType: instant
+              refId: A
+          - refId: C
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }

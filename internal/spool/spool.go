@@ -13,9 +13,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 )
 
 type Spool struct {
+	mu        sync.Mutex
 	dir       string
 	segMax    int64
 	totalMax  int64
@@ -25,12 +28,15 @@ type Spool struct {
 	EvictErrs int // eviction failures (old data not removed); the line writes themselves succeeded
 }
 
+// Open prepares the spool directory but does not create a segment file —
+// the first Append opens one lazily. This keeps a drain-only process
+// (which never appends) from littering empty segment files.
 func Open(dir string, segMaxBytes, totalMaxBytes int64) (*Spool, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
 	s := &Spool{dir: dir, segMax: segMaxBytes, totalMax: totalMaxBytes}
-	segs, err := s.Segments()
+	segs, err := s.segmentsLocked()
 	if err != nil {
 		return nil, err
 	}
@@ -40,13 +46,10 @@ func Open(dir string, segMaxBytes, totalMaxBytes int64) (*Spool, error) {
 			s.curIndex = n
 		}
 	}
-	if err := s.rotate(); err != nil {
-		return nil, err
-	}
 	return s, nil
 }
 
-func (s *Spool) rotate() error {
+func (s *Spool) rotateLocked() error {
 	if s.cur != nil {
 		if err := s.cur.Close(); err != nil {
 			return err
@@ -70,8 +73,10 @@ func (s *Spool) rotate() error {
 // It returns how many previously spooled event lines were dropped to
 // stay under the cap (0 in the normal case).
 func (s *Spool) Append(line []byte) (evicted int, err error) {
-	if s.curSize >= s.segMax {
-		if err := s.rotate(); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cur == nil || s.curSize >= s.segMax {
+		if err := s.rotateLocked(); err != nil {
 			return 0, err
 		}
 	}
@@ -90,17 +95,17 @@ func (s *Spool) Append(line []byte) (evicted int, err error) {
 		}
 		return 0, err
 	}
-	dropped, evictErr := s.evict()
+	dropped, evictErr := s.evictLocked()
 	if evictErr != nil {
 		s.EvictErrs++
 	}
 	return dropped, nil
 }
 
-func (s *Spool) evict() (int, error) {
+func (s *Spool) evictLocked() (int, error) {
 	dropped := 0
 	for {
-		segs, err := s.Segments()
+		segs, err := s.segmentsLocked()
 		if err != nil {
 			return dropped, err
 		}
@@ -128,8 +133,9 @@ func (s *Spool) evict() (int, error) {
 	}
 }
 
-// Segments returns all segment paths, oldest first (current segment last).
-func (s *Spool) Segments() ([]string, error) {
+// segmentsLocked returns all segment paths, oldest first (current segment
+// last). Callers must already hold s.mu.
+func (s *Spool) segmentsLocked() ([]string, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, err
@@ -144,9 +150,93 @@ func (s *Spool) Segments() ([]string, error) {
 	return out, nil
 }
 
+// Segments returns all segment paths, oldest first (current segment last).
+func (s *Spool) Segments() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.segmentsLocked()
+}
+
+// Rotate closes the current segment (if it has content) so the drainer
+// can ship it without waiting for the size threshold. The next Append
+// lazily opens a fresh segment. A no-op when nothing is open.
+func (s *Spool) Rotate() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cur == nil || s.curSize == 0 {
+		return nil
+	}
+	err := s.cur.Close()
+	s.cur = nil
+	s.curSize = 0
+	return err
+}
+
+// ClosedSegments returns every segment except the open current one,
+// oldest first — the set the drainer may ship and Ack.
+func (s *Spool) ClosedSegments() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	segs, err := s.segmentsLocked()
+	if err != nil {
+		return nil, err
+	}
+	if s.cur == nil {
+		return segs, nil
+	}
+	curName := s.cur.Name()
+	out := segs[:0]
+	for _, p := range segs {
+		if p != curName {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// Ack deletes a shipped segment. It refuses the open current segment.
+// A segment already removed (e.g. by cap eviction racing the drainer) counts as acked.
+func (s *Spool) Ack(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cur != nil && path == s.cur.Name() {
+		return fmt.Errorf("spool: refusing to ack the current segment %s", path)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// AcquireLock takes an exclusive advisory lock on dir (via dir/.lock),
+// guarding the spool against a second writer or a concurrent standalone
+// drainer — the cross-process analogue of the in-process mutex. Returns
+// a release func, or an error if another process holds the lock.
+func AcquireLock(dir string) (func(), error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("spool at %s is locked by another agentmon process (watch already drains every tick): %w", dir, err)
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
+}
+
 func (s *Spool) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.cur == nil {
 		return nil
 	}
-	return s.cur.Close()
+	err := s.cur.Close()
+	s.cur = nil
+	return err
 }

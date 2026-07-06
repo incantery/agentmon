@@ -1,0 +1,6 @@
+# agentmon home-lab observability: Loki + Grafana, provisioned as code.
+# Usage: tilt up  (from this directory, with your lab's kubectl context)
+k8s_yaml(kustomize('k8s'))
+
+k8s_resource('loki', port_forwards='3100:3100', labels=['lgtm'])
+k8s_resource('grafana', port_forwards='3000:3000', labels=['lgtm'])
