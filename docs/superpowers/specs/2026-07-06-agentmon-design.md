@@ -134,7 +134,7 @@ Event types (v1):
 | `session_started` | first line of a new file | cwd (often empty — first lines may carry none; envelope `project` backfills) | — |
 | `session_title` | `ai-title` line | title | — |
 | `user_prompt` | `user` line | char count | prompt text |
-| `assistant_message` | `assistant` line | model, token usage, stop reason | content |
+| `assistant_message` | `assistant` line | model, token usage (incl. 5m/1h cache-write split), stop reason, cost_usd (omitted = model unpriced, NOT free; usage deduped across the multiple JSONL lines of one API response) | content |
 | `tool_call` | `assistant` tool_use | tool name | input (truncated) |
 | `tool_result` | `user` tool_result | ok/error | content (truncated) |
 | `permission_mode` | `permission-mode` line | mode | — |
@@ -175,6 +175,9 @@ drops off the critical path; agentmon stays a shipper.
   naturally. Rare edge duplicates are acceptable for observability. Loki must
   be configured to accept old timestamps (`reject_old_samples: false`) or
   `--backfill` ingestion of historical transcripts will be rejected.
+  Caveat: re-derived events change bytes across binary upgrades that alter
+  derivation (e.g. the cost-stamping upgrade) or pricing-table edits —
+  replays across such a boundary will not dedupe.
 - **Pane of glass:** a provisioned Grafana dashboard (sessions activity,
   event/turn rates, token spend, needs-attention panel) over the Loki
   datasource — provisioned as code in `deploy/`, not clicked together.

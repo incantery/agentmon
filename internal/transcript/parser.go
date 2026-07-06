@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"time"
 	"unicode/utf8"
+
+	"github.com/incantery/agentmon/internal/pricing"
 )
 
 // MaxContentBytes caps every content field (prompt text, tool input,
@@ -30,10 +32,16 @@ type Parser struct {
 	// type (plus "malformed" for undecodable lines). New Claude Code
 	// releases must surface here, never as errors.
 	Skipped map[string]int
+
+	// seenMsgIDs dedupes usage across the multiple JSONL lines Claude Code
+	// writes for one API response (one line per content block, each
+	// repeating the same usage object) — only the first line of a message
+	// id carries tokens/cost.
+	seenMsgIDs map[string]struct{}
 }
 
 func NewParser(sessionID string) *Parser {
-	return &Parser{sessionID: sessionID, Skipped: map[string]int{}}
+	return &Parser{sessionID: sessionID, Skipped: map[string]int{}, seenMsgIDs: map[string]struct{}{}}
 }
 
 // rawLine covers the union of top-level fields across observed line types
@@ -133,6 +141,7 @@ func truncate(s string) string {
 
 // rawMessage covers .message on user and assistant lines.
 type rawMessage struct {
+	ID         string `json:"id"`
 	Role       string `json:"role"`
 	Model      string `json:"model"`
 	StopReason string `json:"stop_reason"`
@@ -141,6 +150,10 @@ type rawMessage struct {
 		OutputTokens             int64 `json:"output_tokens"`
 		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		CacheCreation            struct {
+			Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+			Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+		} `json:"cache_creation"`
 	} `json:"usage"`
 	Content json.RawMessage `json:"content"` // string or []rawBlock
 }
@@ -260,6 +273,46 @@ func (p *Parser) assistantPayloads(rl rawLine) []Payload {
 		CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
 		StopReason:          msg.StopReason,
 		Text:                truncate(text.String()),
+	}
+	am.Cache5mTokens = msg.Usage.CacheCreation.Ephemeral5m
+	am.Cache1hTokens = msg.Usage.CacheCreation.Ephemeral1h
+
+	// Claude Code writes one API response as multiple adjacent lines (one
+	// per content block), each repeating the same message id and usage
+	// object. Only the first line for a given id gets billed; later lines
+	// are continuations and must not double-count tokens/cost.
+	dupe := false
+	if msg.ID != "" {
+		if _, ok := p.seenMsgIDs[msg.ID]; ok {
+			dupe = true
+		} else {
+			p.seenMsgIDs[msg.ID] = struct{}{}
+		}
+	}
+
+	if dupe {
+		am.InputTokens = 0
+		am.OutputTokens = 0
+		am.CacheReadTokens = 0
+		am.CacheCreationTokens = 0
+		am.Cache5mTokens = 0
+		am.Cache1hTokens = 0
+	} else {
+		u := pricing.Usage{
+			InputTokens:        am.InputTokens,
+			OutputTokens:       am.OutputTokens,
+			CacheReadTokens:    am.CacheReadTokens,
+			Cache5mWriteTokens: am.Cache5mTokens,
+			Cache1hWriteTokens: am.Cache1hTokens,
+		}
+		if rem := am.CacheCreationTokens - (u.Cache5mWriteTokens + u.Cache1hWriteTokens); rem > 0 {
+			// Split absent or partial: bill the unattributed remainder at the
+			// cheaper 5m rate (conservative-low).
+			u.Cache5mWriteTokens += rem
+		}
+		if usd, priced := pricing.Cost(am.Model, u); priced {
+			am.CostUSD = &usd
+		}
 	}
 	return append([]Payload{am}, calls...)
 }

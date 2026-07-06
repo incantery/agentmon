@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -186,6 +187,13 @@ func TestAssistantMessageWithToolUse(t *testing.T) {
 		CacheReadTokens: 50, CacheCreationTokens: 10,
 		StopReason: "tool_use", Text: "Looking now.",
 	}
+	// claude-fable-5 is priced, so the parser stamps CostUSD; assert it's
+	// non-nil separately, then align the pointer so the rest of the
+	// struct can still be compared with ==.
+	if am.CostUSD == nil {
+		t.Fatal("fable-5 must be priced")
+	}
+	want.CostUSD = am.CostUSD
 	if am != want {
 		t.Errorf("assistant_message = %+v, want %+v", am, want)
 	}
@@ -246,6 +254,95 @@ func TestSystemTurnDuration(t *testing.T) {
 	}
 	if p.Skipped["system:something_new"] != 1 {
 		t.Errorf("Skipped = %v", p.Skipped)
+	}
+}
+
+func TestAssistantCostStamping(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"assistant","message":{"model":"claude-fable-5","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":6199,"output_tokens":383,"cache_read_input_tokens":18341,"cache_creation_input_tokens":3899,"cache_creation":{"ephemeral_5m_input_tokens":3000,"ephemeral_1h_input_tokens":899}}},"timestamp":"2026-07-08T10:00:00.000Z","sessionId":"sess-1"}`,
+	)
+	am := got[1].Payload.(AssistantMessagePayload)
+	if am.Cache5mTokens != 3000 || am.Cache1hTokens != 899 {
+		t.Errorf("cache split = %d/%d", am.Cache5mTokens, am.Cache1hTokens)
+	}
+	if am.CostUSD == nil {
+		t.Fatal("fable-5 must be priced")
+	}
+	want := 6199*10.0/1e6 + 383*50.0/1e6 + 18341*1.0/1e6 + 3000*12.5/1e6 + 899*20.0/1e6
+	if diff := *am.CostUSD - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("cost = %v want %v", *am.CostUSD, want)
+	}
+}
+
+func TestAssistantCostFallbackWithoutSplit(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":100,"output_tokens":10,"cache_creation_input_tokens":1000}},"sessionId":"sess-1"}`,
+	)
+	am := got[1].Payload.(AssistantMessagePayload)
+	if am.CostUSD == nil {
+		t.Fatal("haiku must be priced via prefix")
+	}
+	// no split → all cache_creation treated as 5m (1.25×)
+	want := 100*1.0/1e6 + 10*5.0/1e6 + 1000*1.25/1e6
+	if diff := *am.CostUSD - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("cost = %v want %v", *am.CostUSD, want)
+	}
+}
+
+func TestUnknownModelUnpriced(t *testing.T) {
+	p := NewParser("sess-1")
+	got := collect(t, p,
+		`{"type":"assistant","message":{"model":"qwen3:8b","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":100,"output_tokens":10}},"sessionId":"sess-1"}`,
+	)
+	am := got[1].Payload.(AssistantMessagePayload)
+	if am.CostUSD != nil {
+		t.Errorf("unknown model must be unpriced (nil), got %v", *am.CostUSD)
+	}
+	// and the JSON must omit the field entirely
+	b, _ := json.Marshal(am)
+	if strings.Contains(string(b), "cost_usd") {
+		t.Errorf("unpriced payload must omit cost_usd: %s", b)
+	}
+}
+
+func TestMultiLineResponseBillsUsageOnce(t *testing.T) {
+	p := NewParser("sess-1")
+	// One API response written as two adjacent lines (same message id,
+	// identical usage) — the real Claude Code on-disk shape.
+	got := collect(t, p,
+		`{"type":"assistant","message":{"id":"msg_01AB","model":"claude-fable-5","role":"assistant","content":[{"type":"text","text":"Looking."}],"stop_reason":"tool_use","usage":{"input_tokens":6199,"output_tokens":383,"cache_read_input_tokens":18341,"cache_creation_input_tokens":3899}},"timestamp":"2026-07-08T10:00:00.000Z","sessionId":"sess-1"}`,
+		`{"type":"assistant","message":{"id":"msg_01AB","model":"claude-fable-5","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/x"}}],"stop_reason":"tool_use","usage":{"input_tokens":6199,"output_tokens":383,"cache_read_input_tokens":18341,"cache_creation_input_tokens":3899}},"timestamp":"2026-07-08T10:00:00.100Z","sessionId":"sess-1"}`,
+	)
+	// session_started + am1 + am2 + tool_call
+	if len(got) != 4 {
+		t.Fatalf("got %d events: %+v", len(got), got)
+	}
+	am1 := got[1].Payload.(AssistantMessagePayload)
+	am2 := got[2].Payload.(AssistantMessagePayload)
+	if am1.OutputTokens != 383 || am1.CostUSD == nil {
+		t.Errorf("first line must carry usage+cost: %+v", am1)
+	}
+	if am2.InputTokens != 0 || am2.OutputTokens != 0 || am2.CacheReadTokens != 0 || am2.CacheCreationTokens != 0 || am2.CostUSD != nil {
+		t.Errorf("continuation line must be usage-zeroed and unpriced: %+v", am2)
+	}
+	if got[3].Type != ToolCall {
+		t.Errorf("tool_call lost: %+v", got)
+	}
+}
+
+func TestDistinctMessageIDsBothBilled(t *testing.T) {
+	p := NewParser("sess-1")
+	line := func(id string) string {
+		return `{"type":"assistant","message":{"id":"` + id + `","model":"claude-haiku-4-5","role":"assistant","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":100,"output_tokens":10}},"sessionId":"sess-1"}`
+	}
+	got := collect(t, p, line("msg_A"), line("msg_B"))
+	for i := 1; i <= 2; i++ {
+		am := got[i].Payload.(AssistantMessagePayload)
+		if am.OutputTokens != 10 || am.CostUSD == nil {
+			t.Errorf("line %d must be billed: %+v", i, am)
+		}
 	}
 }
 
