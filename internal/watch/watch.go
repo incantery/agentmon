@@ -28,10 +28,11 @@ type Options struct {
 }
 
 type Watcher struct {
-	opts  Options
-	st    *state.State
-	sink  Sink
-	tails map[string]*tail
+	opts      Options
+	startedAt time.Time
+	st        *state.State
+	sink      Sink
+	tails     map[string]*tail
 
 	FileErrs int // per-file stat/read errors (never fatal)
 	SinkErrs int
@@ -41,7 +42,7 @@ func New(opts Options, st *state.State, sink Sink) *Watcher {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Watcher{opts: opts, st: st, sink: sink, tails: map[string]*tail{}}
+	return &Watcher{opts: opts, startedAt: opts.Now(), st: st, sink: sink, tails: map[string]*tail{}}
 }
 
 // PollOnce runs one deterministic pass over every transcript file:
@@ -79,6 +80,10 @@ func (w *Watcher) pollFile(path string, now time.Time) {
 		if !known {
 			// First sighting ever: fast-forward unless backfilling, so the
 			// first run doesn't flood the sink with historical transcripts.
+			// Only files that PREDATE this watcher fast-forward: a file
+			// born while we watch (mtime at-or-after start) replays from
+			// zero — otherwise a subagent that starts and finishes within
+			// one poll interval would be skipped entirely.
 			// A known file with an unset watermark (backfill mode, or a
 			// shrink-reset saved mid-re-anchor) must NOT fast-forward: its
 			// tail simply replays from zero on the next change, which at
@@ -90,7 +95,7 @@ func (w *Watcher) pollFile(path string, now time.Time) {
 				w.st.Delete(path)
 				return
 			}
-			if !w.opts.Backfill {
+			if !w.opts.Backfill && fi.ModTime().Before(w.startedAt) {
 				fs.Watermark = state.Watermark{Offset: fi.Size(), Seq: -1, Set: true}
 				fs.Size = fi.Size()
 			}

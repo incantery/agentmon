@@ -42,9 +42,14 @@ func newTestWatcher(t *testing.T, st *state.State, backfill bool) (*Watcher, *co
 
 func TestFirstSightingFastForwards(t *testing.T) {
 	st, _ := state.Load("")
-	w, c, dir, _ := newTestWatcher(t, st, false)
+	w, c, dir, now := newTestWatcher(t, st, false)
 	path := filepath.Join(dir, "old.jsonl")
 	write(t, path, line1+line2) // pre-existing history
+	// Predates the watcher: this is the case fast-forward exists for.
+	old := now.Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
 	if err := w.PollOnce(); err != nil {
 		t.Fatal(err)
 	}
@@ -266,10 +271,12 @@ func TestSyntheticAfterFastForwardDoesNotSwallowResume(t *testing.T) {
 	w, c, dir, now := newTestWatcher(t, st, false) // non-backfill: fast-forward
 	path := filepath.Join(dir, "s1.jsonl")
 	write(t, path, line1) // pre-existing content, recent mtime
-	// Anchor mtime to the test's fake clock rather than real wall-clock
-	// time: initTimers seeds activity from fi.ModTime(), and this test
-	// must be deterministic regardless of when it actually runs.
-	if err := os.Chtimes(path, *now, *now); err != nil {
+	// Predates the watcher (so first sighting fast-forwards) but only
+	// just: initTimers seeds activity from mtime, and 31 minutes later
+	// the session must read as inactive. Anchored to the fake clock so
+	// the test is deterministic regardless of when it runs.
+	old := now.Add(-time.Minute)
+	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
 	w.PollOnce() // first sighting: fast-forward, no events
@@ -401,5 +408,23 @@ func TestNoSyntheticsForSubagentFiles(t *testing.T) {
 	}
 	if _, ok := st.Files[path]; ok {
 		t.Error("state entry not pruned after removal")
+	}
+}
+
+func TestFileBornOnWatchReplaysFromZero(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, now := newTestWatcher(t, st, false) // non-backfill
+	w.PollOnce()                                   // watcher running, root quiet
+	// A file created while we watch (e.g. a subagent that starts and
+	// finishes within one poll interval) must be captured in full, not
+	// fast-forwarded past.
+	path := filepath.Join(dir, "born.jsonl")
+	write(t, path, line1)
+	if err := os.Chtimes(path, *now, *now); err != nil {
+		t.Fatal(err)
+	}
+	w.PollOnce()
+	if got := types(c.events); len(got) != 2 || got[0] != transcript.SessionStarted {
+		t.Fatalf("born-on-watch content skipped: %v", got)
 	}
 }
