@@ -204,8 +204,8 @@ func (w *Watcher) scan() []string {
 	// named after the parent session.
 	globs := []string{
 		filepath.Join("*", "*.jsonl"),
-		filepath.Join("*", "*", "subagents", "*.jsonl"),
-		filepath.Join("*", "*", "subagents", "workflows", "*", "*.jsonl"),
+		filepath.Join("*", "*", "subagents", "agent-*.jsonl"),
+		filepath.Join("*", "*", "subagents", "workflows", "*", "agent-*.jsonl"),
 	}
 	var out []string
 	for _, root := range w.opts.Roots {

@@ -156,6 +156,19 @@ func TestAgentTailLoadsMetaLazily(t *testing.T) {
 	if tl.agentType != "" {
 		t.Fatalf("agentType = %q before sidecar exists", tl.agentType)
 	}
+	// Sidecar appears torn (caught mid-write): poll must not latch metaDone,
+	// so a later poll retries instead of losing agentType forever.
+	metaPath := filepath.Join(dir, "agent-a1.meta.json")
+	write(t, metaPath, `{"agentType":"general-pu`)
+	if _, _, err := tl.poll(); err != nil {
+		t.Fatal(err)
+	}
+	if tl.agentType != "" {
+		t.Fatalf("agentType = %q after torn sidecar, want empty", tl.agentType)
+	}
+	if tl.metaDone {
+		t.Fatal("metaDone latched on unparseable sidecar; torn read will never be retried")
+	}
 	// Sidecar appears later (Claude Code may write it after the transcript):
 	// the next poll picks it up. description/spawnDepth are ignored.
 	write(t, filepath.Join(dir, "agent-a1.meta.json"),

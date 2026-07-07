@@ -71,8 +71,9 @@ func newTail(path string, mark state.Watermark, knownSize int64) *tail {
 
 // loadMeta reads the agent file's .meta.json sidecar for agentType. The
 // sidecar may appear after the transcript, so a missing file is retried
-// on every poll until it is read once. description and spawnDepth are
-// deliberately not shipped.
+// on every poll until it is read once; a torn/partial read (caught
+// mid-write) is retried too, rather than latching agentType blank forever.
+// description and spawnDepth are deliberately not shipped.
 func (t *tail) loadMeta() {
 	if t.metaDone {
 		return
@@ -81,13 +82,17 @@ func (t *tail) loadMeta() {
 	if err != nil {
 		return
 	}
-	t.metaDone = true
 	var m struct {
 		AgentType string `json:"agentType"`
 	}
-	if json.Unmarshal(b, &m) == nil {
-		t.agentType = m.AgentType
+	if json.Unmarshal(b, &m) != nil {
+		// Torn/partial write (sidecar caught mid-write): do NOT latch
+		// metaDone, so the next poll retries instead of losing agentType
+		// for this file forever.
+		return
 	}
+	t.metaDone = true
+	t.agentType = m.AgentType
 }
 
 func (t *tail) poll() (events []transcript.Event, grew bool, err error) {

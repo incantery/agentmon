@@ -411,6 +411,42 @@ func TestNoSyntheticsForSubagentFiles(t *testing.T) {
 	}
 }
 
+func TestWorkflowJournalNotTailedAsAgent(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, _ := newTestWatcher(t, st, true)
+	wfDir := filepath.Join(dir, "sess-1", "subagents", "workflows", "wf_ab-1")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(wfDir, "journal.jsonl")
+	agentPath := filepath.Join(wfDir, "agent-a1.jsonl")
+	write(t, journalPath, `{"type":"started"}`+"\n")
+	write(t, agentPath, line1)
+	if err := w.PollOnce(); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range c.events {
+		if ev.AgentID == "journal" {
+			t.Fatalf("journal.jsonl was tailed as a pseudo-agent: %+v", ev)
+		}
+	}
+	if _, ok := st.Files[journalPath]; ok {
+		t.Error("journal.jsonl got a state entry; scan() must not match it")
+	}
+	found := false
+	for _, ev := range c.events {
+		if ev.AgentID == "agent-a1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("sibling agent-a1.jsonl was not discovered")
+	}
+	if _, ok := st.Files[agentPath]; !ok {
+		t.Error("agent-a1.jsonl should have a state entry")
+	}
+}
+
 func TestFileBornOnWatchReplaysFromZero(t *testing.T) {
 	st, _ := state.Load("")
 	w, c, dir, now := newTestWatcher(t, st, false) // non-backfill
