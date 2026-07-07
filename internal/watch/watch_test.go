@@ -337,3 +337,69 @@ func TestHistoricalFilesGrandfatheredSilently(t *testing.T) {
 		t.Error("ancient file not marked Ended")
 	}
 }
+
+func TestSubagentFilesDiscoveredAndAttributed(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, _ := newTestWatcher(t, st, true)
+	subDir := filepath.Join(dir, "sess-1", "subagents")
+	wfDir := filepath.Join(subDir, "workflows", "wf_ab-1")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(subDir, "agent-a1.jsonl"), line1)
+	write(t, filepath.Join(subDir, "agent-a1.meta.json"), `{"agentType":"general-purpose"}`)
+	write(t, filepath.Join(wfDir, "agent-a2.jsonl"), line1)
+	if err := w.PollOnce(); err != nil {
+		t.Fatal(err)
+	}
+	var attributed []transcript.Event
+	for _, ev := range c.events {
+		if ev.SessionID == "sess-1" {
+			attributed = append(attributed, ev)
+		}
+	}
+	// 2 agent files × (session_started + user_prompt), all under the PARENT
+	// session's ID.
+	if len(attributed) != 4 {
+		t.Fatalf("want 4 events attributed to sess-1, got %d (%v)", len(attributed), types(c.events))
+	}
+	agents := map[string]string{}
+	for _, ev := range attributed {
+		if ev.AgentID == "" {
+			t.Errorf("subagent event missing agent_id: %+v", ev)
+		}
+		agents[ev.AgentID] = ev.AgentType
+	}
+	if agents["agent-a1"] != "general-purpose" {
+		t.Errorf("agent-a1 agent_type = %q, want general-purpose", agents["agent-a1"])
+	}
+	if _, ok := agents["agent-a2"]; !ok {
+		t.Errorf("workflow agent file not discovered; agents seen: %v", agents)
+	}
+}
+
+func TestNoSyntheticsForSubagentFiles(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, now := newTestWatcher(t, st, true)
+	subDir := filepath.Join(dir, "sess-1", "subagents")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(subDir, "agent-a1.jsonl")
+	write(t, path, line1+midTurnLine) // mid-turn: a main file would fire idle
+	w.PollOnce()
+	c.events = nil
+	*now = now.Add(31 * time.Minute) // past IdleAfter AND EndedAfter
+	w.PollOnce()
+	if len(c.events) != 0 {
+		t.Fatalf("quiet subagent file fired synthetics for the parent session: %v", types(c.events))
+	}
+	os.Remove(path)
+	w.PollOnce()
+	if len(c.events) != 0 {
+		t.Fatalf("subagent removal fired synthetics: %v", types(c.events))
+	}
+	if _, ok := st.Files[path]; ok {
+		t.Error("state entry not pruned after removal")
+	}
+}

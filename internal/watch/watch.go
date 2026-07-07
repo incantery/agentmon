@@ -61,7 +61,7 @@ func (w *Watcher) PollOnce() error {
 			continue
 		}
 		if t, ok := w.tails[path]; ok {
-			if !fs.Ended {
+			if !fs.Ended && t.agentID == "" {
 				w.synthetic(t, fs, now, transcript.SessionEndedPayload{Reason: "removed"})
 			}
 			delete(w.tails, path)
@@ -106,6 +106,8 @@ func (w *Watcher) pollFile(path string, now time.Time) {
 		return
 	}
 	for _, ev := range evs {
+		ev.AgentID = t.agentID
+		ev.AgentType = t.agentType
 		w.emit(ev)
 	}
 	fs.Watermark = t.mark
@@ -163,6 +165,12 @@ func (w *Watcher) initTimers(fs *state.FileState, fi os.FileInfo, now time.Time)
 }
 
 func (w *Watcher) tickTimers(t *tail, fs *state.FileState, grew bool, now time.Time) {
+	if t.agentID != "" {
+		// Agent files share the parent's session_id: a subagent going
+		// quiet must not report the interactive session idle or ended.
+		// Session lifecycle belongs to the main transcript alone.
+		return
+	}
 	if grew {
 		fs.LastActivityUnix = now.Unix()
 		fs.IdleFired = false
@@ -186,13 +194,23 @@ func (w *Watcher) tickTimers(t *tail, fs *state.FileState, grew bool, now time.T
 }
 
 func (w *Watcher) scan() []string {
+	// Three transcript layouts (spec, "Watching"): the main session file
+	// plus Task-tool and Workflow subagent files nested under a directory
+	// named after the parent session.
+	globs := []string{
+		filepath.Join("*", "*.jsonl"),
+		filepath.Join("*", "*", "subagents", "*.jsonl"),
+		filepath.Join("*", "*", "subagents", "workflows", "*", "*.jsonl"),
+	}
 	var out []string
 	for _, root := range w.opts.Roots {
-		matches, err := filepath.Glob(filepath.Join(root, "*", "*.jsonl"))
-		if err != nil {
-			continue
+		for _, g := range globs {
+			matches, err := filepath.Glob(filepath.Join(root, g))
+			if err != nil {
+				continue
+			}
+			out = append(out, matches...)
 		}
-		out = append(out, matches...)
 	}
 	sort.Strings(out)
 	return out
