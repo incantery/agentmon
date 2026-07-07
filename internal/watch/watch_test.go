@@ -42,9 +42,14 @@ func newTestWatcher(t *testing.T, st *state.State, backfill bool) (*Watcher, *co
 
 func TestFirstSightingFastForwards(t *testing.T) {
 	st, _ := state.Load("")
-	w, c, dir, _ := newTestWatcher(t, st, false)
+	w, c, dir, now := newTestWatcher(t, st, false)
 	path := filepath.Join(dir, "old.jsonl")
 	write(t, path, line1+line2) // pre-existing history
+	// Predates the watcher: this is the case fast-forward exists for.
+	old := now.Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
 	if err := w.PollOnce(); err != nil {
 		t.Fatal(err)
 	}
@@ -266,10 +271,12 @@ func TestSyntheticAfterFastForwardDoesNotSwallowResume(t *testing.T) {
 	w, c, dir, now := newTestWatcher(t, st, false) // non-backfill: fast-forward
 	path := filepath.Join(dir, "s1.jsonl")
 	write(t, path, line1) // pre-existing content, recent mtime
-	// Anchor mtime to the test's fake clock rather than real wall-clock
-	// time: initTimers seeds activity from fi.ModTime(), and this test
-	// must be deterministic regardless of when it actually runs.
-	if err := os.Chtimes(path, *now, *now); err != nil {
+	// Predates the watcher (so first sighting fast-forwards) but only
+	// just: initTimers seeds activity from mtime, and 31 minutes later
+	// the session must read as inactive. Anchored to the fake clock so
+	// the test is deterministic regardless of when it runs.
+	old := now.Add(-time.Minute)
+	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
 	w.PollOnce() // first sighting: fast-forward, no events
@@ -335,5 +342,125 @@ func TestHistoricalFilesGrandfatheredSilently(t *testing.T) {
 	}
 	if !st.File(path).Ended {
 		t.Error("ancient file not marked Ended")
+	}
+}
+
+func TestSubagentFilesDiscoveredAndAttributed(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, _ := newTestWatcher(t, st, true)
+	subDir := filepath.Join(dir, "sess-1", "subagents")
+	wfDir := filepath.Join(subDir, "workflows", "wf_ab-1")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(subDir, "agent-a1.jsonl"), line1)
+	write(t, filepath.Join(subDir, "agent-a1.meta.json"), `{"agentType":"general-purpose"}`)
+	write(t, filepath.Join(wfDir, "agent-a2.jsonl"), line1)
+	if err := w.PollOnce(); err != nil {
+		t.Fatal(err)
+	}
+	var attributed []transcript.Event
+	for _, ev := range c.events {
+		if ev.SessionID == "sess-1" {
+			attributed = append(attributed, ev)
+		}
+	}
+	// 2 agent files × (session_started + user_prompt), all under the PARENT
+	// session's ID.
+	if len(attributed) != 4 {
+		t.Fatalf("want 4 events attributed to sess-1, got %d (%v)", len(attributed), types(c.events))
+	}
+	agents := map[string]string{}
+	for _, ev := range attributed {
+		if ev.AgentID == "" {
+			t.Errorf("subagent event missing agent_id: %+v", ev)
+		}
+		agents[ev.AgentID] = ev.AgentType
+	}
+	if agents["agent-a1"] != "general-purpose" {
+		t.Errorf("agent-a1 agent_type = %q, want general-purpose", agents["agent-a1"])
+	}
+	if _, ok := agents["agent-a2"]; !ok {
+		t.Errorf("workflow agent file not discovered; agents seen: %v", agents)
+	}
+}
+
+func TestNoSyntheticsForSubagentFiles(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, now := newTestWatcher(t, st, true)
+	subDir := filepath.Join(dir, "sess-1", "subagents")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(subDir, "agent-a1.jsonl")
+	write(t, path, line1+midTurnLine) // mid-turn: a main file would fire idle
+	w.PollOnce()
+	c.events = nil
+	*now = now.Add(31 * time.Minute) // past IdleAfter AND EndedAfter
+	w.PollOnce()
+	if len(c.events) != 0 {
+		t.Fatalf("quiet subagent file fired synthetics for the parent session: %v", types(c.events))
+	}
+	os.Remove(path)
+	w.PollOnce()
+	if len(c.events) != 0 {
+		t.Fatalf("subagent removal fired synthetics: %v", types(c.events))
+	}
+	if _, ok := st.Files[path]; ok {
+		t.Error("state entry not pruned after removal")
+	}
+}
+
+func TestWorkflowJournalNotTailedAsAgent(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, _ := newTestWatcher(t, st, true)
+	wfDir := filepath.Join(dir, "sess-1", "subagents", "workflows", "wf_ab-1")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(wfDir, "journal.jsonl")
+	agentPath := filepath.Join(wfDir, "agent-a1.jsonl")
+	write(t, journalPath, `{"type":"started"}`+"\n")
+	write(t, agentPath, line1)
+	if err := w.PollOnce(); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range c.events {
+		if ev.AgentID == "journal" {
+			t.Fatalf("journal.jsonl was tailed as a pseudo-agent: %+v", ev)
+		}
+	}
+	if _, ok := st.Files[journalPath]; ok {
+		t.Error("journal.jsonl got a state entry; scan() must not match it")
+	}
+	found := false
+	for _, ev := range c.events {
+		if ev.AgentID == "agent-a1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("sibling agent-a1.jsonl was not discovered")
+	}
+	if _, ok := st.Files[agentPath]; !ok {
+		t.Error("agent-a1.jsonl should have a state entry")
+	}
+}
+
+func TestFileBornOnWatchReplaysFromZero(t *testing.T) {
+	st, _ := state.Load("")
+	w, c, dir, now := newTestWatcher(t, st, false) // non-backfill
+	w.PollOnce()                                   // watcher running, root quiet
+	// A file created while we watch (e.g. a subagent that starts and
+	// finishes within one poll interval) must be captured in full, not
+	// fast-forwarded past.
+	path := filepath.Join(dir, "born.jsonl")
+	write(t, path, line1)
+	if err := os.Chtimes(path, *now, *now); err != nil {
+		t.Fatal(err)
+	}
+	w.PollOnce()
+	if got := types(c.events); len(got) != 2 || got[0] != transcript.SessionStarted {
+		t.Fatalf("born-on-watch content skipped: %v", got)
 	}
 }

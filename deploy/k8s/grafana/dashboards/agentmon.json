@@ -145,6 +145,25 @@
           "expr": "sum(count_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | payload_cost_usd=\"\" [24h])) or vector(0)"
         }
       ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Cost/hour by agent type (USD)",
+      "description": "Blank agent_type = the interactive session's own messages; named types are subagent fleets (general-purpose, workflow-subagent, ...).",
+      "gridPos": { "h": 7, "w": 18, "x": 6, "y": 32 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (agent_type) (sum_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | unwrap payload_cost_usd | __error__=\"\" [$__auto]))"
+        }
+      ]
     }
   ]
 }

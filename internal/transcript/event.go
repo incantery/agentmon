@@ -29,12 +29,19 @@ var AllEventTypes = []EventType{
 }
 
 // Event is the envelope defined in the design spec. Identity for
-// server-side dedupe is (machine, session_id, offset, seq); Machine is
-// stamped by the shipper, not the parser.
+// server-side dedupe is (machine, session_id, agent_id, offset, seq);
+// Machine is stamped by the shipper, not the parser.
 type Event struct {
-	Machine   string    `json:"machine,omitempty"`
-	Project   string    `json:"project,omitempty"`
-	SessionID string    `json:"session_id"`
+	Machine   string `json:"machine,omitempty"`
+	Project   string `json:"project,omitempty"`
+	SessionID string `json:"session_id"`
+	// AgentID/AgentType identify subagent transcripts; empty (and omitted
+	// from JSON) for the session's main transcript. Omitempty is load-
+	// bearing: main-transcript events must stay byte-identical to those
+	// shipped before these fields existed, or Loki dedupe stops absorbing
+	// replays.
+	AgentID   string    `json:"agent_id,omitempty"`
+	AgentType string    `json:"agent_type,omitempty"`
 	Offset    int64     `json:"offset"`
 	Seq       int       `json:"seq"`
 	TS        time.Time `json:"ts,omitzero"`

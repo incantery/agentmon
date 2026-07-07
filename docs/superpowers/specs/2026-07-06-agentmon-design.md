@@ -76,7 +76,9 @@ personal laptop: same ──────────────────┘ 
 ### Delivery semantics
 
 At-least-once, server-side idempotent. Events carry identity
-`(machine, session_id, offset, seq)` — `offset` is the byte offset of the source
+`(machine, session_id, agent_id, offset, seq)` — `agent_id` is `""` for the
+session's main transcript and the agent file's ID (e.g. `agent-a26075c2f…`) for
+subagent transcripts, which share the parent's `session_id`; `offset` is the byte offset of the source
 line (timer-derived events reuse the last-seen offset) and `seq` is the index of
 the event within that line's derivation, since one line can yield several events
 (an `assistant` line → message + N tool calls). **Seq sign convention (frozen
@@ -96,19 +98,41 @@ visible, never silent.
 
 ### Watching
 
-Transcript layout (verified against real files):
-`~/.claude/projects/<encoded-project-path>/<session-uuid>.jsonl` — one file per
-session, filename is the session ID, directory encodes the project path. Lines
-are typed JSON objects; observed types include `user`, `assistant`, `system`,
-`attachment`, `ai-title`, `mode`, `permission-mode`, `last-prompt`,
-`file-history-snapshot`, `queue-operation`.
+Transcript layout (verified against real files) — three shapes, all watched:
+
+- `~/.claude/projects/<encoded-project-path>/<session-uuid>.jsonl` — the main
+  session transcript; filename is the session ID.
+- `…/<session-uuid>/subagents/agent-<id>.jsonl` — Task-tool subagent
+  transcripts.
+- `…/<session-uuid>/subagents/workflows/<wf-id>/agent-<id>.jsonl` — Workflow
+  agent transcripts.
+
+Subagent files use the same line format (plus `isSidechain: true` and
+`agentId`); their events carry the **parent** `session_id` (taken from the
+path component above `subagents/`) and their own `agent_id`, so per-session
+cost aggregates include the session's whole agent fleet. Each agent file has a
+`<name>.meta.json` sidecar (`agentType`, `description`, `spawnDepth`); the
+watcher reads it (lazily, retrying per poll until present) and stamps
+`agent_type` on the file's events. `description` and `spawnDepth` are not
+shipped. Lines are typed JSON objects; observed types include `user`,
+`assistant`, `system`, `attachment`, `ai-title`, `mode`, `permission-mode`,
+`last-prompt`, `file-history-snapshot`, `queue-operation`.
 
 Watching is poll-based (default 2s): stat known files plus a glob rescan per
 tick — no fsnotify dependency; latency is bounded by the interval, which is
-fine for a monitor. First sighting of a file fast-forwards (no history
-emitted) unless `--backfill` is set. Per-file state (inode, byte offset) is
-persisted so restarts resume without re-shipping. Unknown line types are counted
-and skipped — new Claude Code releases must never crash the shipper.
+fine for a monitor. First sighting of a file whose mtime predates the
+watcher's start fast-forwards (no history emitted) unless `--backfill` is
+set; a file first sighted with mtime at-or-after watcher start was born on
+our watch and replays from zero — otherwise a subagent that starts and
+finishes within one poll interval would be skipped entirely (this also
+captures the first lines of new main sessions, previously fast-forwarded
+past). Watcher timer synthetics (`session_idle`, `session_ended`) are
+**suppressed for agent files** — with the parent's `session_id` they would
+misreport the interactive session as idle/ended every time a subagent
+finished; session lifecycle is the main transcript's alone. Per-file state
+(inode, byte offset) is persisted so restarts resume without re-shipping.
+Unknown line types are counted and skipped — new Claude Code releases must
+never crash the shipper.
 
 ## Derived event schema
 
@@ -119,6 +143,8 @@ Envelope (every event):
   "machine":    "seth-mbp-work",
   "project":    "/Users/sethlowie/go/src/github.com/incantery/sigil",
   "session_id": "d34f1644-…",
+  "agent_id":   "agent-a26075c2f3130fa7c",
+  "agent_type": "general-purpose",
   "offset":     183422,
   "seq":        1,
   "ts":         "2026-07-06T14:03:22Z",
@@ -126,6 +152,9 @@ Envelope (every event):
   "payload":    { }
 }
 ```
+
+`agent_id` and `agent_type` are omitted (not empty strings) on main-transcript
+events; `agent_type` is omitted when the sidecar hasn't been read yet.
 
 Event types (v1):
 
