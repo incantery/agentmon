@@ -136,13 +136,14 @@
       "id": 10,
       "type": "stat",
       "title": "Unpriced messages (24h)",
+      "description": "Assistant messages with real token usage but no cost_usd: the model is missing from internal/pricing. Omitted cost = unpriced, NOT free — nonzero here means cost totals are undercounting. Zero-usage continuation lines (dedupe lines of multi-block responses) are excluded.",
       "gridPos": { "h": 7, "w": 6, "x": 0, "y": 32 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
           "refId": "A",
           "instant": true,
-          "expr": "sum(count_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | payload_cost_usd=\"\" [24h])) or vector(0)"
+          "expr": "sum(count_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | payload_cost_usd=\"\" | payload_output_tokens!=\"0\" or payload_input_tokens!=\"0\" [24h])) or vector(0)"
         }
       ]
     },
@@ -162,6 +163,21 @@
         {
           "refId": "A",
           "expr": "sum by (agent_type) (sum_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | unwrap payload_cost_usd | __error__=\"\" [$__auto]))"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "Unpriced messages by model (24h)",
+      "description": "Models that need a row in internal/pricing (zero-usage continuation lines excluded). Empty table = every model priced.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 39 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "topk(10, sum by (payload_model) (count_over_time({job=\"agentmon\", type=\"assistant_message\"} | json | payload_cost_usd=\"\" | payload_output_tokens!=\"0\" or payload_input_tokens!=\"0\" [24h])))"
         }
       ]
     }
